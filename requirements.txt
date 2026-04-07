@@ -1,0 +1,14 @@
+pyserial>=3.5
+pygame>=2.5
+opencv-python>=4.8
+opencv-contrib-python>=4.8
+numpy>=1.24
+mediapipe>=0.10
+
+# Hardware-specific (uncomment on Raspberry Pi)
+# adafruit-circuitpython-ssd1306
+# adafruit-circuitpython-neopixel
+# adafruit-circuitpython-servokit
+# picamera2
+# openai-whisper
+# piper-tts

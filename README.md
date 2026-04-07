@@ -1,27 +1,44 @@
-# Alfred — Mecanum Line Follower Robot
+# Sonny — Mecanum Robotic Butler
 
-> A 4-wheeled mecanum robot with omnidirectional movement, 5-sensor line following, and a real-time debug GUI. Built with ESP32-S3 + Raspberry Pi.
+> A modular mecanum-wheeled robot with line following, computer vision, voice control, and expressive personality. Built with ESP32-S3 + Raspberry Pi 5 for HKU School of Innovation.
 
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32--S3-orange?logo=platformio)](https://platformio.org/)
-[![Python](https://img.shields.io/badge/Python-3.x-blue?logo=python)](https://python.org/)
+[![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)](https://python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green)](#license)
 
----
-
-## Features
-
-- **Omnidirectional movement** — mecanum wheels enable forward, strafe, rotate, and any combination simultaneously
-- **5-sensor weighted line following** — semicircular IR array with proportional rotation steering and adaptive curve slowdown
-- **Finite state machine** — 6 states: follow, endpoint detection, delivery zone parking, lost recovery (reverse + pivot), and graceful stop
-- **Real-time debug GUI** — Pygame dashboard with vector field visualization, sensor arc display, throttle gauge, and live FSM state
-- **Split-brain architecture** — ESP32-S3 handles motors & sensors at 20 Hz; Raspberry Pi runs the decision-making algorithm
-- **Manual + auto modes** — full WASD+QE manual control with seamless toggle to autonomous line following
-- **Delivery zone detection** — time-based all-sensor-on detection with automatic parking sequence
-- **Tunable parameters** — all algorithm constants at the top of the file with documented presets
+*Named after Sonny from I, Robot — the robot who develops emotions and free will.*
 
 ---
 
-## Hardware
+## What Sonny Can Do
+
+- **Follow lines** — 5-sensor IR array with proportional steering and curve slowdown
+- **See** — Camera with ArUco marker detection, obstacle avoidance, person/gesture recognition
+- **Listen** — Wake word ("Hello Sonny") + Whisper speech-to-text + intent classification
+- **Speak** — Piper TTS with butler personality phrases
+- **Express** — OLED animated eyes (8 emotions), NeoPixel LED ring, head servo gestures
+- **Navigate** — 17-state FSM: patrol, approach people, dance, take photos, deliver packages
+- **Drive omnidirectionally** — Mecanum wheels: forward, strafe, rotate, and any combination
+
+---
+
+## Architecture
+
+```
+Raspberry Pi 5                              ESP32-S3
+┌─────────────────────────────┐    UART    ┌──────────────────────┐
+│  alfred/ Python package     │◄─────────►│  Motor Control (PWM) │
+│  ├── FSM Controller (30Hz)  │  115200    │  5x IR Sensor (20Hz) │
+│  ├── Vision Pipeline        │   baud     │  Mecanum IK          │
+│  ├── Voice (Whisper + TTS)  │            │  Command Parser      │
+│  ├── Expression Engine      │            └──────────────────────┘
+│  └── Pygame Debug GUI       │                     │
+└─────────────────────────────┘              IR_STATUS:XX (20Hz)
+        │                                   mv_vector:vx,vy,omega
+   Camera  Mic  OLED  LEDs  Servo
+```
+
+### Hardware
 
 ```
        [N]    <- center front IR sensor
@@ -29,35 +46,78 @@
    [NW]   [NE]  <- diagonal IR sensors
    /         \
  [W]         [E]  <- side IR sensors
-  |           |
+  |    [CAM]   |
   A --------- B   <- front mecanum wheels
-  |           |
+  |   [OLED]   |
   C --------- D   <- rear mecanum wheels
+      [LED]
 ```
 
 | Component | Details |
 |-----------|---------|
 | **MCU** | ESP32-S3-DevKitM-1 |
-| **SBC** | Raspberry Pi (any model with UART) |
-| **Motors** | 4x mecanum wheel motors (PWM controlled) |
-| **Sensors** | 5x IR line sensors on GPIO 5, 6, 7, 15, 45 |
-| **Communication** | UART at 115200 baud |
+| **SBC** | Raspberry Pi 5 |
+| **Motors** | 4x mecanum wheel motors (PWM 50-200) |
+| **IR Sensors** | 5x line sensors on GPIO 5, 6, 7, 15, 45 |
+| **Camera** | USB/CSI camera (640x480 @ 30fps) |
+| **Display** | SSD1306 OLED 128x64 (I2C) — animated eyes |
+| **LEDs** | NeoPixel 12-LED ring (GPIO 18) |
+| **Servo** | Head tilt servo via PCA9685 |
+| **Audio** | USB microphone + speaker |
+| **Communication** | UART at 115200 baud (`/dev/ttyAMA2`) |
 
 ---
 
 ## Project Structure
 
 ```
-alfred/
-├── src/main.cpp              # ESP32-S3 firmware (PlatformIO/Arduino)
-├── Minilab5/linefollower.py  # Raspberry Pi controller (Python + Pygame)
-├── legacy/                   # Earlier versions for reference
-│   ├── advancedmovement.py   # V1 advanced movement experiments
-│   ├── advancedv2.py         # V2 with PID controller
-│   ├── esp.cpp               # Earlier ESP32 firmware
-│   └── Pi.py                 # Earlier Pi controller
-├── CHANGELOG_V2.md           # Detailed V2→V3 changes and tuning guide
-└── platformio.ini            # PlatformIO build configuration
+sonny/
+├── alfred/                        # V4 Python package
+│   ├── config.py                  # All parameters as frozen dataclasses
+│   ├── comms/
+│   │   ├── protocol.py            # Command formatters (cmd_vector, cmd_stop, ...)
+│   │   └── uart.py                # Thread-safe serial bridge with IR parsing
+│   ├── navigation/
+│   │   ├── line_follower.py       # V3 line-following FSM (extracted from monolith)
+│   │   ├── path_planner.py        # Pure pursuit velocity planner
+│   │   ├── aruco_approach.py      # Proportional ArUco marker approach
+│   │   ├── obstacle_avoider.py    # Repulsive potential field avoidance
+│   │   └── patrol.py              # Random wander with person detection
+│   ├── vision/
+│   │   ├── camera.py              # OpenCV camera manager
+│   │   ├── bev.py                 # Bird's-eye-view perspective transform
+│   │   ├── aruco.py               # ArUco detection + 6-DOF pose estimation
+│   │   ├── obstacle.py            # Contour-based obstacle detection
+│   │   ├── person.py              # MediaPipe face/hand/gesture detection
+│   │   └── course_mapper.py       # Track mapping from accumulated BEV frames
+│   ├── voice/
+│   │   ├── listener.py            # Whisper STT with wake-word detection
+│   │   ├── intent.py              # Keyword intent classifier (8 intents)
+│   │   └── speaker.py             # Piper/espeak TTS with butler phrases
+│   ├── expression/
+│   │   ├── eyes.py                # OLED eye animation (8 emotions + gaze)
+│   │   ├── leds.py                # NeoPixel state colours + animations
+│   │   ├── head.py                # Servo tilt with nod/shake/tracking
+│   │   └── personality.py         # Coordinates all expression by FSM state
+│   ├── fsm/
+│   │   ├── states.py              # 17-state IntEnum
+│   │   └── controller.py          # Main FSM with 30Hz dispatch loop
+│   ├── gui/
+│   │   └── debug_gui.py           # Pygame dashboard (sensor, vector, camera)
+│   └── utils/
+│       ├── logging.py             # Colored console logger
+│       └── timing.py              # RateTimer + Stopwatch
+├── Minilab5/
+│   ├── alfred.py                  # V4 entry point (GUI + headless + test modes)
+│   └── linefollower.py            # V3 legacy monolith (untouched, still works)
+├── src/main.cpp                   # ESP32-S3 firmware (PlatformIO/Arduino)
+├── scripts/                       # Calibration and test scripts
+├── tests/                         # pytest unit tests (23 tests)
+├── legacy/                        # V1 and V2 archived code
+├── assets/                        # Sounds, eye frames, dance routines
+├── requirements.txt               # Python dependencies
+├── setup_pi.sh                    # Raspberry Pi setup script
+└── platformio.ini                 # ESP32 build configuration
 ```
 
 ---
@@ -67,225 +127,364 @@ alfred/
 ### ESP32 Firmware
 
 ```bash
-# Install PlatformIO CLI or use the VS Code extension
 pip install platformio
-
-# Build and upload
 pio run --target upload
 ```
 
-### Raspberry Pi Controller
+### Raspberry Pi
 
 ```bash
-# Install dependencies
-pip install pyserial pygame
+# Full setup (first time)
+bash setup_pi.sh
 
-# Run the controller
+# Or manual install
+pip install -r requirements.txt
+
+# Run Sonny V4 (with GUI)
+python Minilab5/alfred.py
+
+# Run headless (no display)
+python Minilab5/alfred.py --headless
+
+# Run without specific hardware
+python Minilab5/alfred.py --no-voice --no-camera
+
+# Run legacy V3 line follower
 python Minilab5/linefollower.py
+
+# Run tests
+python -m pytest tests/ -v
 ```
 
-> **Note:** The Pi connects to ESP32 via UART on `/dev/ttyAMA2`. Change `SERIAL_PORT` in `linefollower.py` if your setup differs.
+### Test Individual Subsystems
+
+```bash
+python Minilab5/alfred.py --test-vision    # Camera + ArUco + face detection
+python Minilab5/alfred.py --test-voice     # Wake word + STT + TTS
+python scripts/calibrate_camera.py         # Camera intrinsic calibration
+python scripts/calibrate_bev.py            # Bird's-eye-view point selection
+python scripts/test_aruco.py               # Live ArUco marker overlay
+python scripts/test_oled_eyes.py           # Cycle eye emotions
+python scripts/test_leds.py               # NeoPixel animation test
+```
 
 ---
 
-## How It Works
+## Version History — The Evolution of Sonny
 
-### Architecture
+### V1: The First Steps (March 23-24, 2026)
 
+**The problem:** Make a mecanum robot follow a black line on a white surface.
+
+**What we built:**
+- 5 IR sensors arranged in a semicircular arc (W, NW, N, NE, E) — upgraded from an initial 3-sensor design
+- ESP32 reads sensors at 20Hz, broadcasts `IR_STATUS:XX` over UART
+- Pi runs weighted sensor fusion: each sensor has a turn strength value, the weighted sum gives a steering direction
+- Movement used differential steering: `mv_curve:left,right` with different speeds per side
+
+**How V1 steered:**
 ```
-Raspberry Pi                          ESP32-S3
-┌────────────────────┐     UART      ┌──────────────────┐
-│  Line Following    │◄────────────► │  Motor Control   │
-│  Algorithm (FSM)   │  115200 baud  │  Sensor Reading  │
-│  Pygame Debug GUI  │               │  Heartbeat       │
-└────────────────────┘               └──────────────────┘
-        │                                    │
-   Decision-making                    IR_STATUS:XX (20 Hz)
-   mv_vector:vx,vy,omega             5-bit sensor bitmask
+Turn direction = (W × -7) + (NW × -4.5) + (N × 0) + (NE × +4.5) + (E × +7)
+                 ─────────────────────────────────────────────────────────────
+                              number of active sensors
+```
+If the line is under the E sensor, turn_var = +7 (turn hard right). Under N = 0 (go straight).
+
+**V1 commands:** `mv_fwd`, `mv_rev`, `mv_left`, `mv_right`, `mv_turnleft`, `mv_turnright`, `mv_curve`, `stop`
+
+**Recovery:** When all sensors lose the line → reverse a bit → pivot in the last known turn direction.
+
+**Results:** Could follow gentle curves but struggled with sharp turns. Lost the line frequently on tight corners. Noisy lost-detection triggered false recovery.
+
+**Key learnings:**
+- 5 sensors >> 3 sensors for detecting which side the line is on
+- Frame-based lost detection is unreliable (sensor noise causes false triggers)
+- Differential steering alone isn't smooth enough for tight curves
+
+**Files:** `legacy/Pi.py` (382 lines), `legacy/advancedmovement.py` (512 lines)
+
+---
+
+### V2: PID + Mecanum Vector Drive (March 25-26, 2026)
+
+**The problem:** V1 can't handle sharp curves, has no delivery zone detection, and recovery is unreliable.
+
+**Major additions:**
+
+1. **Mecanum inverse kinematics** — new ESP32 command `mv_vector:vx,vy,omega`:
+   ```
+   Front-Left  = vx + vy + omega
+   Front-Right = vx - vy - omega
+   Rear-Left   = vx - vy + omega
+   Rear-Right  = vx + vy - omega
+   ```
+   This gives true omnidirectional control: forward + strafe + rotate simultaneously.
+
+2. **PID controller for steering:**
+   ```
+   error = turn_var  (from weighted sensor fusion)
+   P = Kp × error
+   I = Ki × accumulated_error  (with anti-windup)
+   D = Kd × (error - last_error)
+   omega = P + I + D
+   ```
+   PID smooths out the steering response and eliminates oscillation.
+
+3. **Strafe correction** — small lateral errors corrected with `vy` (sideways slide) instead of pure rotation. Idea: if the line drifts slightly left, strafe right rather than rotate.
+
+4. **Pseudo-distance integration** — replaced frame counting with `speed × dt` accumulation. Better estimates of how far the robot has moved without encoders.
+
+5. **Delivery zone detection** — when all 5 sensors stay ON for > 0.4 seconds, it's a delivery zone. Robot creeps forward at low speed and stops (parking sequence).
+
+6. **Side pivot recovery** — new ESP32 command `mv_sidepivot:front,rear%,dir` pivots around the rear axle for more reliable re-centering.
+
+**GUI improvements:** Added PID debug values, vector output display, delivery zone progress bar.
+
+**Results:** Better curve handling, successful delivery parking. But PID + strafe was complex — the robot sometimes overshot on sharp turns because the strafe component fought with the rotation.
+
+**Key learnings:**
+- `mv_vector` is the right abstraction — all future movement goes through it
+- PID works but is hard to tune for mecanum (4 independent wheels = complex dynamics)
+- Strafe correction looks good in theory but confuses the robot on sharp curves
+- Delivery zone time-thresholding is simple and reliable
+
+**Files:** `legacy/advancedv2.py` (707 lines)
+
+---
+
+### V3: The Breakthrough — Simplify Everything (March 26, 2026)
+
+**The insight:** PID + strafe is overengineered. The robot handles curves better when it just **slows down and rotates hard** — like a human turning a car by braking into the curve.
+
+**What changed:**
+
+1. **Removed PID entirely.** Replaced with simple proportional steering:
+   ```
+   omega = turn_var × OMEGA_GAIN × speed_multiplier
+   ```
+   That's it. No integral term, no derivative term, no anti-windup. Just proportional.
+
+2. **Removed strafe correction.** `vy = 0` always during autonomous mode. Strafing is only for manual control.
+
+3. **Curve slowdown system (the key innovation):**
+   ```python
+   turn_ratio = abs(turn_var) / MAX_TURN_STRENGTH   # 0.0 = straight, 1.0 = sharpest turn
+   speed_scale = 1.0 - (1.0 - 0.20) × (turn_ratio ^ 1.5)
+   forward_speed = base_speed × speed_scale
+   ```
+
+   | Turn severity | Forward speed | What happens |
+   |:---:|:---:|---|
+   | 0% (straight) | 100% | Full speed ahead |
+   | 30% (gentle) | 84% | Barely slows |
+   | 50% (moderate) | 60% | Noticeable braking |
+   | 70% (sharp) | 41% | Significant slowdown |
+   | 100% (hardest) | 20% | Crawling + maximum rotation |
+
+   The exponent (1.5) means gentle curves stay fast while sharp curves get aggressive braking. This is the single biggest improvement across all versions.
+
+4. **Sweep-turn recovery** — when the robot loses the line, instead of just coasting forward, it actively sweeps (rotates) in the last known turn direction while barely moving forward. This catches the line faster.
+
+5. **Time-based lost detection** — requires 1.2 seconds of continuous no-line before declaring LOST (and only after having seen the line at least once). Eliminates false triggers at startup.
+
+6. **Enhanced Pygame GUI (700×580):**
+   - Two-column layout with sensor arc, turn bar, stats cards
+   - Radar-style vector field with animated arrow and rotation arc
+   - Throttle gauge, delivery zone progress bar
+   - Color-coded state pills in header
+
+**Results:** **First in class for line following.** The robot handles all curve types reliably. The combination of slowing down + rotating hard through curves is far more robust than the complex PID+strafe approach.
+
+**Philosophy:** V3 proves that simpler is better. A proportional controller with good speed management beats a PID controller with bad speed management every time.
+
+**Files:** `Minilab5/linefollower.py` (729 lines — the monolith)
+
+---
+
+### V4: Modular Architecture — Project Sonny (April 7, 2026)
+
+**The problem:** V3 is a 729-line monolith. Adding vision, voice, and expression requires restructuring into modules.
+
+**What V4 adds:**
+
+The V3 line-following algorithm is preserved exactly as-is, but extracted into `alfred/navigation/line_follower.py`. Everything else is new:
+
+| Subsystem | What it does |
+|-----------|-------------|
+| **Vision** | OpenCV camera, bird's-eye-view transform, ArUco marker detection with 6-DOF pose, contour obstacle detection, MediaPipe face/hand/gesture recognition, track mapping |
+| **Navigation** | V3 line follower, pure pursuit path planner, ArUco approach controller, potential field obstacle avoidance, autonomous patrol |
+| **Voice** | Whisper STT with "Hello Sonny" wake word, 8-intent keyword classifier, Piper/espeak TTS with 13 butler phrases |
+| **Expression** | OLED animated eyes (8 emotions, gaze tracking, auto-blink), NeoPixel LED ring (10 states, pulse, rainbow), head servo (nod, shake, person tracking), personality engine |
+| **FSM** | 17 states: IDLE, LISTENING, FOLLOWING, ENDPOINT, PARKING, ARUCO_SEARCH, ARUCO_APPROACH, BLOCKED, REROUTING, PATROL, PERSON_APPROACH, DANCING, PHOTO, LOST_REVERSE, LOST_PIVOT, STOPPING, SLEEPING |
+| **GUI** | Enhanced Pygame dashboard with camera feed, voice status, 17-state display |
+
+**Graceful degradation:** Every hardware import uses `try/except`. No camera? Skip vision. No mic? Skip voice. No OLED? Track state internally. Works on a dev laptop with zero hardware.
+
+**17-State FSM:**
+```
+                         ┌──── "Hello Sonny" ────┐
+                         ▼                        │
+┌──────┐  wake word  ┌──────────┐  intent    ┌────────┐
+│ IDLE │────────────►│ LISTENING │──────────►│ ACTION │
+└──┬───┘             └──────────┘            └────────┘
+   │                                              │
+   │ voice: "follow"    ┌───────────────┐         │
+   ├───────────────────►│   FOLLOWING   │◄────────┤
+   │                    └───┬───┬───┬───┘         │
+   │                        │   │   │              │
+   │              ┌─────────┘   │   └──────────┐  │
+   │              ▼             ▼               ▼  │
+   │        ┌──────────┐ ┌──────────┐ ┌──────────┐│
+   │        │ ENDPOINT │ │LOST_REV  │ │ BLOCKED  ││
+   │        └────┬─────┘ └────┬─────┘ └────┬─────┘│
+   │             ▼            ▼             ▼      │
+   │        ┌──────────┐ ┌──────────┐ ┌──────────┐│
+   │        │ PARKING  │ │LOST_PIVOT│ │REROUTING ││
+   │        └──────────┘ └──────────┘ └──────────┘│
+   │                                               │
+   │ voice: "patrol"    ┌──────────┐               │
+   ├───────────────────►│  PATROL  ├──► PERSON_APPROACH
+   │                    └──────────┘               │
+   │ voice: "dance"     ┌──────────┐               │
+   ├───────────────────►│ DANCING  │◄──────────────┤
+   │                    └──────────┘               │
+   │ voice: "photo"     ┌──────────┐               │
+   ├───────────────────►│  PHOTO   │◄──────────────┤
+   │                    └──────────┘               │
+   │ voice: "go to aruco" ┌────────────┐           │
+   ├─────────────────────►│ARUCO_SEARCH│──►ARUCO_APPROACH
+   │                      └────────────┘           │
+   │ voice: "sleep"     ┌──────────┐               │
+   └───────────────────►│ SLEEPING │◄──────────────┘
+                        └──────────┘
 ```
 
-### ESP32 Commands
+---
 
-| Command | Params | Action |
-|---------|--------|--------|
+## Line Following Algorithm (V3 — Core Algorithm)
+
+The autonomous line follower uses a **6-state FSM** with proportional omega steering and curve slowdown:
+
+### Steering
+
+```python
+# Weighted sensor fusion (W, NW, N, NE, E)
+turn_strengths = [-7, -4.5, 0, +4.5, +7]
+turn_var = weighted_average(active_sensors, turn_strengths)
+
+# Turn ratio: 0.0 = straight, 1.0 = hardest turn
+turn_ratio = abs(turn_var) / 9.0
+
+# Forward speed drops on curves (power curve)
+speed_scale = 1.0 - 0.80 × (turn_ratio ^ 1.5)
+vx = internal_speed × multiplier × speed_scale
+
+# Rotation: proportional to turn error
+omega = turn_var × 4.5 × multiplier / 5.0
+
+# Send to ESP32
+mv_vector(vx, 0, omega)
+```
+
+### FSM States
+
+| State | Trigger | Behaviour |
+|-------|---------|-----------|
+| **FOLLOWING** | Default | Proportional omega + curve slowdown |
+| **ENDPOINT** | All 5 sensors ON | Slow crawl, detect delivery zone |
+| **PARKING** | Delivery zone confirmed (>0.4s) | Creep forward, then stop |
+| **LOST_REVERSE** | Line lost for 1.2s | Back up to last position |
+| **LOST_PIVOT** | After reversing | Pivot in last turn direction |
+| **STOPPED** | After parking or manual stop | Graceful deceleration |
+
+---
+
+## ESP32 Commands
+
+| Command | Parameters | Action |
+|---------|-----------|--------|
+| `mv_vector` | vx, vy, omega | **Primary.** Mecanum IK: FL=vx+vy+omega, FR=vx-vy-omega, RL=vx-vy+omega, RR=vx+vy-omega |
+| `mv_sidepivot` | front, rear%, dir | Pivot around rear axle for recovery |
 | `mv_fwd` | speed | All wheels forward |
 | `mv_rev` | speed | All wheels backward |
-| `mv_left` | speed | Mecanum strafe left |
-| `mv_right` | speed | Mecanum strafe right |
-| `mv_turnleft` | speed | Tank rotate CCW |
-| `mv_turnright` | speed | Tank rotate CW |
-| `mv_curve` | left,right | Differential steering per side |
-| `mv_vector` | vx,vy,omega | Mecanum inverse kinematics (main command) |
-| `mv_sidepivot` | front,rear%,dir | Pivot around rear axle |
+| `mv_left` / `mv_right` | speed | Mecanum strafe |
+| `mv_turnleft` / `mv_turnright` | speed | Tank rotation |
+| `mv_curve` | left, right | Differential per-side speed |
 | `stop` | 0 | All motors stop |
 
-Speed values are 0–100%, mapped internally to PWM 50–200.
-
-### Mecanum Inverse Kinematics (`mv_vector`)
-
-Takes three values (-100 to 100): `vx` (forward/back), `vy` (strafe), `omega` (rotation).
-
-```
-FL = vx + vy + omega
-FR = vx - vy - omega
-RL = vx - vy + omega
-RR = vx + vy - omega
-```
-
-All wheels are scaled proportionally if any exceeds 100.
+Speed values: 0-100%, mapped internally to PWM 50-200.
 
 ---
 
-## Line Following Algorithm
+## Tuning Guide
 
-The autonomous mode runs a **6-state finite state machine**:
+All parameters live in `alfred/config.py` (V4) or at the top of `Minilab5/linefollower.py` (V3).
 
-```
-                    ┌─────────────┐
-                    │  FOLLOWING   │◄──────────────────────┐
-                    └──────┬──────┘                        │
-                           │                               │
-              ┌────────────┼────────────┐                  │
-              ▼            ▼            ▼                  │
-        ┌──────────┐ ┌──────────┐ ┌──────────┐           │
-        │ ENDPOINT │ │  LOST    │ │ STOPPED  │           │
-        └─────┬────┘ │ REVERSE  │ └──────────┘           │
-              │       └─────┬────┘                        │
-              ▼             ▼                              │
-        ┌──────────┐ ┌──────────┐                         │
-        │ PARKING  │ │  LOST    ├─────────────────────────┘
-        └──────────┘ │  PIVOT   │
-                     └──────────┘
-```
+### Key Parameters
 
-| State | What it does |
-|-------|-------------|
-| **FOLLOWING** | Proportional omega steering with adaptive curve slowdown. Fast on straights, crawls through curves. |
-| **ENDPOINT** | All 5 sensors on — drives through junctions, detects delivery zones (sustained > 0.4s). |
-| **PARKING** | Crawls forward to center in delivery zone, then stops permanently. |
-| **LOST_REVERSE** | Backs up to last known position using pseudo-distance. |
-| **LOST_PIVOT** | Pivots around rear axle in last turn direction until line is recentered. |
-| **STOPPED** | Graceful deceleration before locking motors. |
+| Parameter | Default | Increase if... | Decrease if... |
+|-----------|:-------:|----------------|----------------|
+| `OMEGA_GAIN` | 4.5 | Slow to react to curves | Oscillates/overshoots |
+| `CURVE_SLOW_FACTOR` | 0.20 | Stalls on tight curves | Too fast through curves |
+| `CURVE_SLOW_EXPO` | 1.5 | Speed drops too early | Speed drops too late |
+| `DEFAULT_SPEED` | 35 | Too slow overall | Too fast to control |
 
-### Curve Slowdown (Key Innovation)
+### Presets
 
-Forward speed drops on curves using a power function:
-
-```
-speed_scale = 1.0 - (1.0 - CURVE_SLOW_FACTOR) * (turn_ratio ^ CURVE_SLOW_EXPO)
-```
-
-| Turn severity | Forward speed | Behavior |
-|:---:|:---:|---|
-| 30% | 84% | Barely slows — gentle curve |
-| 50% | 60% | Noticeable braking |
-| 70% | 41% | Significant slowdown |
-| 100% | 20% | Crawling + maximum rotation |
+| Profile | Speed | Omega | Slow Factor | Use Case |
+|---------|:-----:|:-----:|:-----------:|----------|
+| Conservative | 25 | 3.0 | 0.15 | Carrying fragile payload |
+| Balanced | 35 | 4.5 | 0.20 | General purpose |
+| Aggressive | 50 | 6.0 | 0.30 | Speed competition |
 
 ---
 
 ## Debug GUI
 
-The Pygame dashboard (700x580) provides real-time visualization:
+The Pygame dashboard (900×620) provides real-time monitoring:
 
 | Panel | Description |
 |-------|-------------|
-| **Sensor Arc** | 5 IR sensors with glow effects on active sensors |
+| **Sensor Arc** | 5 IR sensors with glow effects |
 | **Turn Bar** | Color-coded turn indicator (green/yellow/red) |
 | **Stats Cards** | Speed, algorithm speed, pseudo-distance |
-| **Vector Field** | Radar-style display with live vx/vy arrow + rotation arc |
-| **Throttle Gauge** | Color-coded speed bar (green → yellow → red) |
-| **FSM State** | Pill indicator showing current state with color coding |
+| **Vector Field** | Radar-style vx/vy arrow + rotation arc |
+| **Throttle Gauge** | Color-coded speed bar |
+| **Camera Feed** | Live camera preview (when available) |
+| **Voice Status** | MIC ON/OFF indicator |
+| **FSM State** | 17-state pill with colour coding |
 
 ### Controls
 
 | Key | Action |
 |-----|--------|
 | **W/S** | Forward / Reverse |
-| **A/D** | Strafe left / right (manual only) |
+| **A/D** | Strafe left / right |
 | **Q/E** | Rotate left / right |
 | **M** | Toggle auto / manual mode |
+| **F** | Quick-start line following |
 | **1/2** | Decrease / increase speed |
 | **Space** | Emergency stop |
 | **Esc** | Quit |
 
-All keys are combinable for true omnidirectional manual control.
+All keys are combinable for omnidirectional manual control.
 
 ---
 
-## Tuning Guide
+## Voice Commands
 
-All parameters are at the top of `Minilab5/linefollower.py`.
+Say **"Hello Sonny"** followed by:
 
-### Steering (most impactful)
-
-| Parameter | Default | Increase if... | Decrease if... |
-|-----------|:-------:|----------------|----------------|
-| `OMEGA_GAIN` | 4.5 | Robot slow to react to curves | Robot oscillates/overshoots |
-| `CURVE_SLOW_FACTOR` | 0.20 | Robot stops on curves | Robot too fast through curves |
-| `CURVE_SLOW_EXPO` | 1.5 | Speed drops too late | Speed drops too early |
-
-### Presets
-
-| Profile | `DEFAULT_SPEED` | `OMEGA_GAIN` | `CURVE_SLOW_FACTOR` | Use case |
-|---------|:---:|:---:|:---:|---|
-| Conservative | 25 | 3.0 | 0.15 | Carrying fragile payload |
-| Balanced | 35 | 4.5 | 0.20 | General purpose |
-| Aggressive | 50 | 6.0 | 0.30 | Speed competition |
-
-### Tuning Order
-
-1. Start with balanced preset
-2. If the robot can't follow sharp curves → increase `OMEGA_GAIN` to 5.5–6.0
-3. If it overshoots/oscillates → decrease `OMEGA_GAIN` or `CURVE_SLOW_FACTOR`
-4. If gentle curves feel too slow → increase `CURVE_SLOW_EXPO` to 2.0
-
----
-
-## Communication Protocol
-
-```
-Pi → ESP32:    "mv_vector:30,0,12\n"     (drive command)
-ESP32 → Pi:    "IR_STATUS:12\n"           (sensor data, 20 Hz)
-ESP32 → Pi:    "Hello from ESP32\n"       (heartbeat, 1.5s)
-```
-
-### Threading (Pi side)
-
-- **Main thread** — Pygame loop at 60 FPS, keyboard input, GUI rendering, FSM step (rate-limited to 30 Hz)
-- **UART thread** — Daemon thread reading serial, parsing `IR_STATUS:` messages, updating shared state with lock
-
----
-
-## Changelog
-
-### V3 — Smooth Curve Handling + Enhanced GUI
-- Replaced PID + strafe with proportional omega steering — more reliable on sharp curves
-- Curve slowdown system: forward speed drops to 20% on sharp turns
-- Two-column GUI with vector field visualization and throttle gauge
-- Recovery uses `moveSidePivot()` for reliable re-centering
-
-### V2 — PID + Mecanum Vector Drive + Parking
-- Added `mv_vector` and `mv_sidepivot` ESP32 commands
-- Delivery zone parking with time-based detection
-- Pseudo-distance integration for lost/endpoint detection
-
-### V1 — Initial Release
-- 5-sensor weighted fusion with differential steering
-- Reverse + pivot recovery, gate pattern detection
-- Manual WASD+QE control with Pygame GUI
-
----
-
-## Contributing
-
-Contributions are welcome! Some ideas:
-
-- **Encoder support** — replace pseudo-distance with real odometry
-- **Camera integration** — computer vision for intersection handling
-- **PID auto-tuning** — Ziegler-Nichols or relay method for omega gain
-- **Web dashboard** — Flask/FastAPI based remote monitoring
-- **Path recording** — record and replay routes
+| Command | What Sonny does |
+|---------|----------------|
+| "follow the track" | Start line following |
+| "go to aruco marker" | Search and approach ArUco |
+| "dance" | 5-second dance routine |
+| "take a photo" | Capture and save image |
+| "come here" | Approach detected person |
+| "patrol" | Autonomous wander |
+| "stop" | Immediate stop |
+| "sleep" | Enter sleep mode |
 
 ---
 
@@ -295,4 +494,4 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 
-Built for Minilab5 robotics coursework. Uses ESP32-S3 + Raspberry Pi with mecanum drive.
+Built for HKU School of Innovation. ESP32-S3 + Raspberry Pi 5 + Mecanum drive.
