@@ -11,9 +11,10 @@ sudo apt-get install -y \
     python3-opencv \
     libatlas-base-dev \
     i2c-tools \
-    espeak-ng \
+    espeak-ng espeak-ng-data \
     ffmpeg \
-    portaudio19-dev
+    portaudio19-dev \
+    mbrola mbrola-us1
 
 # Enable I2C and UART if not already
 sudo raspi-config nonint do_i2c 0
@@ -28,4 +29,23 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 
-echo "=== Setup complete. Activate with: source .venv/bin/activate ==="
+# Download VOSK model if not present
+VOSK_MODEL="vosk-model-small-en-us-0.15"
+if [ ! -d "$VOSK_MODEL" ]; then
+    echo "Downloading VOSK model..."
+    wget -q "https://alphacephei.com/vosk/models/$VOSK_MODEL.zip"
+    unzip -q "$VOSK_MODEL.zip"
+    rm "$VOSK_MODEL.zip"
+    echo "VOSK model downloaded to $VOSK_MODEL/"
+else
+    echo "VOSK model already exists."
+fi
+
+echo ""
+echo "=== Setup complete ==="
+echo "Activate with: source .venv/bin/activate"
+echo "Run with: python Minilab5/alfred.py"
+echo ""
+echo "Optional: For Claude API conversation (EC3):"
+echo "  pip install anthropic"
+echo "  export ANTHROPIC_API_KEY=your-key-here"

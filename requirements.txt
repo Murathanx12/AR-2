@@ -1,14 +1,22 @@
+# Core dependencies
 pyserial>=3.5
 pygame>=2.5
 opencv-python>=4.8
 opencv-contrib-python>=4.8
 numpy>=1.24
-mediapipe>=0.10
+
+# Voice (R1) — VOSK offline STT
+vosk>=0.3.45
+PyAudio>=0.2.14
+
+# Vision — gesture recognition (EC1, optional)
+# mediapipe>=0.10
+
+# Conversation (EC3) — needs ANTHROPIC_API_KEY env var
+# anthropic>=0.40.0
 
 # Hardware-specific (uncomment on Raspberry Pi)
 # adafruit-circuitpython-ssd1306
 # adafruit-circuitpython-neopixel
 # adafruit-circuitpython-servokit
 # picamera2
-# openai-whisper
-# piper-tts

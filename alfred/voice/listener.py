@@ -1,72 +1,94 @@
-"""Voice listener — wake-word detection and speech-to-text."""
+"""Voice listener — wake-word detection and speech-to-text using VOSK.
+
+Uses VOSK (offline) + PyAudio for lightweight, low-latency voice recognition.
+Based on the proven minilab6.py approach.
+"""
 
 import threading
 import time
 import logging
-import io
-import wave
+import json
+import os
 
 logger = logging.getLogger(__name__)
 
 try:
-    import sounddevice as sd
-    _HAS_SD = True
+    import pyaudio
+    _HAS_PYAUDIO = True
 except (ImportError, OSError):
-    _HAS_SD = False
-    logger.warning("sounddevice not available — voice listener disabled")
+    _HAS_PYAUDIO = False
+    logger.warning("pyaudio not available — voice listener disabled")
 
 try:
-    import numpy as np
-    _HAS_NP = True
+    from vosk import Model, KaldiRecognizer
+    _HAS_VOSK = True
 except ImportError:
-    _HAS_NP = False
-
-_whisper_model = None
-
-
-def _get_whisper():
-    """Lazy-load whisper model."""
-    global _whisper_model
-    if _whisper_model is not None:
-        return _whisper_model
-    try:
-        import whisper
-        _whisper_model = whisper.load_model("base")
-        logger.info("Whisper model loaded")
-        return _whisper_model
-    except (ImportError, Exception) as e:
-        logger.warning(f"Whisper unavailable: {e}")
-        return None
+    _HAS_VOSK = False
+    logger.warning("vosk not available — voice listener disabled")
 
 
 class VoiceListener:
-    """Listens for wake word and transcribes speech using Whisper.
+    """Listens for wake word and task commands using VOSK offline STT.
 
+    Grammar-constrained recognition for fast, accurate command detection.
     When hardware is unavailable, all methods are safe no-ops.
     """
 
     SAMPLE_RATE = 16000
-    CHANNELS = 1
-    CHUNK_SECONDS = 3  # record in 3-second chunks
-    SILENCE_THRESHOLD = 0.02  # RMS below this = silence
+    CHUNK_SIZE = 4000  # ~250ms chunks at 16kHz
 
-    def __init__(self, wake_phrase="Hello Sonny"):
+    # VOSK grammar — all words the recognizer will try to match
+    GRAMMAR = json.dumps([
+        # Wake phrase
+        "hello", "sonny", "hello sonny",
+        # Task commands (R1)
+        "follow", "track", "follow track", "follow the track",
+        "go", "to", "code", "qr", "qr code", "go to qr code",
+        "go to code", "go to marker",
+        # Control commands
+        "stop", "halt", "freeze",
+        "dance", "groove",
+        "photo", "picture", "selfie",
+        "come", "here", "come here",
+        "patrol", "wander", "roam",
+        "sleep", "rest", "standby",
+        "search",
+        # Conversation (EC3)
+        "chat", "talk", "tell me",
+        # Confirmation
+        "confirm", "ok", "okay", "yes", "cancel", "no",
+        # Filler
+        "[unk]",
+    ])
+
+    def __init__(self, wake_phrase="Hello Sonny",
+                 model_path=None):
+        """
+        Args:
+            wake_phrase: Phrase to activate command listening.
+            model_path: Path to VOSK model directory. Auto-detected if None.
+        """
         self._wake_phrase = wake_phrase.lower()
+        self._model_path = model_path
         self._running = False
         self._callback = None
         self._thread = None
+
+        # Thread-safe event flags (like minilab6.py pattern)
+        self._lock = threading.Lock()
         self._wake_detected = False
         self._listening_for_command = False
+        self._last_text = ""
 
     def start(self):
         """Start background listening thread."""
-        if not _HAS_SD or not _HAS_NP:
-            logger.warning("Cannot start voice listener: sounddevice/numpy not available")
+        if not _HAS_PYAUDIO or not _HAS_VOSK:
+            logger.warning("Cannot start voice listener: pyaudio/vosk not available")
             return
         self._running = True
         self._thread = threading.Thread(target=self._listen_loop, daemon=True)
         self._thread.start()
-        logger.info("Voice listener started")
+        logger.info("Voice listener started (VOSK)")
 
     def stop(self):
         """Stop listening."""
@@ -76,78 +98,128 @@ class VoiceListener:
         logger.info("Voice listener stopped")
 
     def on_speech(self, callback):
-        """Register callback for recognised speech: callback(text, intent)."""
+        """Register callback for recognised speech: callback(text).
+
+        The callback receives the command text (after wake phrase detection).
+        """
         self._callback = callback
 
     def is_wake_word_detected(self):
-        """Whether the wake word was detected in recent audio."""
-        detected = self._wake_detected
-        self._wake_detected = False  # consume the detection
+        """Whether the wake word was detected in recent audio. Consuming."""
+        with self._lock:
+            detected = self._wake_detected
+            self._wake_detected = False
         return detected
 
+    @property
+    def last_text(self):
+        """Last recognised text (for debug display)."""
+        with self._lock:
+            return self._last_text
+
+    def _find_model(self):
+        """Find VOSK model directory."""
+        if self._model_path and os.path.isdir(self._model_path):
+            return self._model_path
+
+        # Common locations on Pi
+        candidates = [
+            os.path.join(os.getcwd(), "vosk-model-small-en-us-0.15"),
+            os.path.expanduser("~/coursework/minilab6/vosk-model-small-en-us-0.15"),
+            "/home/intc1002/coursework/minilab6/vosk-model-small-en-us-0.15",
+            os.path.join(os.path.dirname(__file__), "..", "..", "vosk-model-small-en-us-0.15"),
+        ]
+        for path in candidates:
+            if os.path.isdir(path):
+                return path
+        return None
+
     def _listen_loop(self):
-        """Background loop: record chunks, transcribe, check for wake word."""
+        """Background loop: stream audio to VOSK, detect wake word + commands."""
+        model_path = self._find_model()
+        if not model_path:
+            logger.error("VOSK model not found. Voice listener disabled.")
+            logger.error("Download: https://alphacephei.com/vosk/models -> vosk-model-small-en-us-0.15")
+            return
+
+        try:
+            logger.info(f"Loading VOSK model from {model_path}...")
+            model = Model(model_path)
+            logger.info("VOSK model loaded.")
+        except Exception as e:
+            logger.error(f"Failed to load VOSK model: {e}")
+            return
+
+        p = pyaudio.PyAudio()
+        try:
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=self.SAMPLE_RATE,
+                input=True,
+                frames_per_buffer=self.CHUNK_SIZE,
+            )
+        except Exception as e:
+            logger.error(f"Failed to open audio input: {e}")
+            p.terminate()
+            return
+
+        rec = KaldiRecognizer(model, self.SAMPLE_RATE, self.GRAMMAR)
+        logger.info(f"Voice listener ready. Wake phrase: '{self._wake_phrase}'")
+
         while self._running:
             try:
-                audio = self._record_chunk()
-                if audio is None:
-                    time.sleep(0.5)
+                data = stream.read(self.CHUNK_SIZE, exception_on_overflow=False)
+                if len(data) == 0:
                     continue
 
-                # Check if there's actual speech (not silence)
-                rms = np.sqrt(np.mean(audio ** 2))
-                if rms < self.SILENCE_THRESHOLD:
-                    continue
+                if rec.AcceptWaveform(data):
+                    result = rec.Result()
+                    try:
+                        r = json.loads(result)
+                        text = r.get("text", "").lower().strip()
+                        if not text:
+                            continue
 
-                text = self._transcribe(audio)
-                if not text:
-                    continue
+                        with self._lock:
+                            self._last_text = text
 
-                text_lower = text.strip().lower()
-                logger.debug(f"Heard: {text_lower}")
+                        logger.debug(f"[Voice] Heard: {text}")
+                        self._process_text(text)
 
-                # Check for wake word
-                if self._wake_phrase in text_lower:
-                    self._wake_detected = True
-                    self._listening_for_command = True
-                    logger.info("Wake word detected!")
-                    # Extract command after wake phrase
-                    idx = text_lower.find(self._wake_phrase)
-                    command = text_lower[idx + len(self._wake_phrase):].strip()
-                    if command and self._callback:
-                        self._callback(command)
-                elif self._listening_for_command:
-                    # We heard the wake word before, now listening for command
-                    if self._callback:
-                        self._callback(text_lower)
-                    self._listening_for_command = False
+                    except json.JSONDecodeError:
+                        continue
 
             except Exception as e:
                 logger.error(f"Voice listener error: {e}")
-                time.sleep(1.0)
+                time.sleep(0.5)
 
-    def _record_chunk(self):
-        """Record a short audio chunk. Returns numpy array or None."""
-        if not _HAS_SD:
-            return None
-        try:
-            frames = int(self.SAMPLE_RATE * self.CHUNK_SECONDS)
-            audio = sd.rec(frames, samplerate=self.SAMPLE_RATE,
-                          channels=self.CHANNELS, dtype='float32')
-            sd.wait()
-            return audio.flatten()
-        except Exception as e:
-            logger.debug(f"Recording error: {e}")
-            return None
+        # Cleanup
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
 
-    def _transcribe(self, audio):
-        """Transcribe audio using Whisper. Returns text string or empty."""
-        model = _get_whisper()
-        if model is None:
-            return ""
-        try:
-            result = model.transcribe(audio, language="en", fp16=False)
-            return result.get("text", "")
-        except Exception as e:
-            logger.debug(f"Transcription error: {e}")
-            return ""
+    def _process_text(self, text):
+        """Process recognised text: check for wake word, dispatch commands."""
+        wake = self._wake_phrase
+
+        if wake in text:
+            with self._lock:
+                self._wake_detected = True
+                self._listening_for_command = True
+            logger.info("Wake word detected!")
+
+            # Extract command after wake phrase (if any)
+            idx = text.find(wake)
+            command = text[idx + len(wake):].strip()
+            if command and self._callback:
+                self._callback(command)
+                with self._lock:
+                    self._listening_for_command = False
+
+        elif self._listening_for_command:
+            # Already woke up, now listening for the command
+            if self._callback:
+                self._callback(text)
+            with self._lock:
+                self._listening_for_command = False

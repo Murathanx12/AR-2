@@ -6,10 +6,54 @@ import logging
 from alfred.config import CONFIG
 from alfred.fsm.states import State, STATE_NAMES
 from alfred.comms.uart import UARTBridge
-from alfred.comms.protocol import cmd_stop, cmd_vector
+from alfred.comms.protocol import (
+    cmd_stop, cmd_vector, cmd_led, cmd_led_pattern, cmd_buzzer,
+    cmd_turn_left, cmd_turn_right, cmd_spin_left,
+)
 from alfred.navigation.line_follower import LineFollower, FollowState
 
 logger = logging.getLogger(__name__)
+
+# R5: LED color map per state — (r, g, b)
+STATE_LED_COLORS = {
+    State.IDLE:             (0, 0, 100),     # dim blue
+    State.LISTENING:        (0, 100, 255),    # bright blue
+    State.FOLLOWING:        (0, 255, 0),      # green
+    State.ENDPOINT:         (0, 255, 100),    # green-cyan
+    State.PARKING:          (0, 255, 200),    # cyan
+    State.ARUCO_SEARCH:     (255, 255, 0),    # yellow
+    State.ARUCO_APPROACH:   (255, 165, 0),    # orange
+    State.BLOCKED:          (255, 0, 0),      # red
+    State.REROUTING:        (255, 50, 0),     # red-orange
+    State.PATROL:           (100, 0, 255),    # purple
+    State.PERSON_APPROACH:  (255, 0, 255),    # magenta
+    State.DANCING:          (255, 255, 255),  # white (rainbow pattern)
+    State.PHOTO:            (255, 255, 255),  # white flash
+    State.LOST_REVERSE:     (255, 100, 0),    # orange
+    State.LOST_PIVOT:       (255, 100, 0),    # orange
+    State.STOPPING:         (255, 0, 0),      # red
+    State.SLEEPING:         (0, 0, 0),        # off
+}
+
+# R5: TTS announcements per state
+STATE_ANNOUNCEMENTS = {
+    State.LISTENING:        "I'm listening.",
+    State.FOLLOWING:        "Following the track.",
+    State.ARUCO_SEARCH:     "Searching for the marker.",
+    State.ARUCO_APPROACH:   "Marker found. Approaching.",
+    State.BLOCKED:          "Obstacle detected. Please clear the path.",
+    State.REROUTING:        "Finding another way around.",
+    State.PATROL:           "Starting patrol.",
+    State.PERSON_APPROACH:  "I see someone. Coming over.",
+    State.DANCING:          "Time to dance!",
+    State.PHOTO:            "Say cheese!",
+    State.STOPPING:         "Stopping.",
+    State.SLEEPING:         "Going to sleep. Say Hello Sonny to wake me.",
+    State.IDLE:             None,  # no announcement for idle
+}
+
+# Ultrasonic obstacle threshold (cm)
+OBSTACLE_THRESHOLD_CM = 20.0
 
 
 class AlfredFSM:
@@ -101,6 +145,7 @@ class AlfredFSM:
         self.voice_listener = None
         self.intent_classifier = None
         self.speaker = None
+        self.conversation = None
 
         if not no_voice:
             try:
@@ -118,6 +163,11 @@ class AlfredFSM:
             try:
                 from alfred.voice.speaker import Speaker
                 self.speaker = Speaker()
+            except Exception:
+                pass
+            try:
+                from alfred.voice.conversation import ConversationEngine
+                self.conversation = ConversationEngine(speaker=self.speaker)
             except Exception:
                 pass
 
@@ -166,6 +216,7 @@ class AlfredFSM:
 
         self.state = State.IDLE
         self._running = False
+        self._previous_state = None  # for resuming after obstacle
 
         # Per-state context
         self._dance_start = None
@@ -176,6 +227,7 @@ class AlfredFSM:
         self._last_frame = None
         self._last_faces = []
         self._last_obstacles = []
+        self._listen_timeout = None  # when LISTENING should timeout
 
         # Dispatch table
         self._tick_dispatch = {
@@ -217,13 +269,20 @@ class AlfredFSM:
         self._running = True
         print(f"Sonny V4 online. State: {STATE_NAMES[self.state]}")
 
+        # R5: Set initial LED color
+        self._update_led(State.IDLE)
+
         if self.personality:
             self.personality.express_greeting()
+
+        if self.speaker:
+            self.speaker.say("greet")
 
     def stop(self):
         """Shut down all subsystems."""
         self._running = False
         self.uart.send(cmd_stop())
+        self.uart.send(cmd_led(0, 0, 0))
         self.uart.close()
 
         if self.camera:
@@ -244,13 +303,48 @@ class AlfredFSM:
         print("Sonny V4 shutting down.")
 
     def transition(self, new_state: State):
-        """Transition to a new state."""
+        """Transition to a new state with R5 indicators."""
         if new_state == self.state:
             return
         old_name = STATE_NAMES[self.state]
         new_name = STATE_NAMES[new_state]
         print(f"[FSM] {old_name} -> {new_name}")
+
+        self._previous_state = self.state
         self.state = new_state
+
+        # R5: Update LED color for new state
+        self._update_led(new_state)
+
+        # R5: TTS announcement for state transition
+        announcement = STATE_ANNOUNCEMENTS.get(new_state)
+        if announcement and self.speaker:
+            self.speaker.say(announcement)
+
+    def _update_led(self, state):
+        """Send LED color command for given state via UART."""
+        color = STATE_LED_COLORS.get(state, (0, 0, 0))
+        self.uart.send(cmd_led(*color))
+
+        # Special patterns for certain states
+        if state == State.DANCING:
+            self.uart.send(cmd_led_pattern(2))  # rainbow
+        elif state == State.BLOCKED:
+            self.uart.send(cmd_led_pattern(3))  # blink red
+        elif state == State.ARUCO_SEARCH:
+            self.uart.send(cmd_led_pattern(4))  # breathe yellow
+        elif state == State.SLEEPING:
+            self.uart.send(cmd_led_pattern(4))  # breathe dim
+            self.uart.send(cmd_led(0, 0, 30))
+        else:
+            self.uart.send(cmd_led_pattern(0))  # solid
+
+    def _check_ultrasonic_obstacle(self) -> bool:
+        """Check ultrasonic sensor for obstacles (R4).
+
+        Returns True if obstacle detected within threshold.
+        """
+        return self.uart.is_obstacle_detected(OBSTACLE_THRESHOLD_CM)
 
     def tick(self):
         """Run one FSM cycle: read sensors, dispatch state handler, update expression."""
@@ -285,6 +379,11 @@ class AlfredFSM:
         intent, confidence = self.intent_classifier.classify(text)
         print(f"[Voice] '{text}' -> {intent} ({confidence:.1f})")
 
+        # EC3: Handle chat/conversation intent
+        if intent == "chat" and self.conversation:
+            self.conversation.handle(text)
+            return
+
         intent_to_state = {
             "follow_track": State.FOLLOWING,
             "go_to_aruco":  State.ARUCO_SEARCH,
@@ -305,6 +404,11 @@ class AlfredFSM:
             elif target == State.PHOTO:
                 self._photo_taken = False
             self.transition(target)
+        elif intent == "confirm":
+            # Confirm can be used in selection modes
+            pass
+        elif intent == "cancel":
+            self.transition(State.IDLE)
         elif self.personality:
             self.personality.express_confusion()
 
@@ -313,22 +417,30 @@ class AlfredFSM:
     def _tick_idle(self):
         """Wait for voice command or GUI input. Check for wake word."""
         if self.voice_listener and self.voice_listener.is_wake_word_detected():
+            self._listen_timeout = time.monotonic() + self.config.voice.listen_timeout
             self.transition(State.LISTENING)
 
     def _tick_listening(self):
         """Actively listening for a command after wake word.
-        Times out back to IDLE after 5 seconds of no command."""
-        # The voice listener callback handles commands automatically.
-        # This state just shows the listening expression.
-        pass
+        Times out back to IDLE after listen_timeout seconds."""
+        if self._listen_timeout and time.monotonic() > self._listen_timeout:
+            self._listen_timeout = None
+            if self.speaker:
+                self.speaker.say("I didn't catch that.")
+            self.transition(State.IDLE)
 
     def _tick_following(self):
         """Run line follower and mirror sub-FSM transitions."""
+        # R4: Check ultrasonic obstacle
+        if self._check_ultrasonic_obstacle():
+            self.transition(State.BLOCKED)
+            return
+
         ir_bits = self.uart.get_ir_bits()
         command = self.line_follower.tick(ir_bits)
         self.uart.send(command)
 
-        # Check for obstacles while following
+        # Also check camera-based obstacles
         if self.obstacle_detector and self._last_frame is not None:
             if not self.obstacle_detector.is_path_clear(self._last_frame):
                 self.transition(State.BLOCKED)
@@ -336,6 +448,9 @@ class AlfredFSM:
 
         # Mirror sub-FSM state transitions
         if self.line_follower.finished:
+            self.uart.send(cmd_buzzer(1000, 200))  # R5: beep on completion
+            if self.speaker:
+                self.speaker.say("arrived")
             self.transition(State.IDLE)
         elif self.line_follower.state == FollowState.ENDPOINT:
             self.transition(State.ENDPOINT)
@@ -358,14 +473,16 @@ class AlfredFSM:
 
     def _tick_aruco_search(self):
         """Scan for ArUco markers by rotating slowly."""
+        # R4: Check ultrasonic obstacle while searching
+        if self._check_ultrasonic_obstacle():
+            self.transition(State.BLOCKED)
+            return
+
         if self.aruco_detector and self._last_frame is not None:
             markers = self.aruco_detector.detect(self._last_frame)
             if markers:
                 # Found a marker — start approach
                 self._aruco_target_id = markers[0]["id"]
-                pose = self.aruco_detector.estimate_pose(markers[0])
-                if pose:
-                    self._last_aruco_pose = pose
                 self.transition(State.ARUCO_APPROACH)
                 return
 
@@ -376,9 +493,14 @@ class AlfredFSM:
         self.line_follower.debug_omega = 30
 
     def _tick_aruco_approach(self):
-        """Drive toward detected ArUco marker."""
+        """Drive toward detected ArUco marker using visual approach (R3)."""
         if not self.aruco_detector or not self.aruco_approach or self._last_frame is None:
             self.transition(State.IDLE)
+            return
+
+        # R4: Check ultrasonic obstacle while approaching
+        if self._check_ultrasonic_obstacle():
+            self.transition(State.BLOCKED)
             return
 
         markers = self.aruco_detector.detect(self._last_frame)
@@ -393,41 +515,67 @@ class AlfredFSM:
             self.transition(State.ARUCO_SEARCH)
             return
 
+        # Try calibrated approach first, fall back to visual-only
         pose = self.aruco_detector.estimate_pose(target_marker)
-        if pose and self.aruco_approach.is_arrived(pose["tvec"]):
-            self.uart.send(cmd_stop())
-            print(f">>> Arrived at ArUco marker {self._aruco_target_id}")
-            self.transition(State.IDLE)
-            return
-
         if pose:
+            # Calibrated approach
+            if self.aruco_approach.is_arrived(pose["tvec"]):
+                self._on_aruco_arrived()
+                return
             vx, vy, omega = self.aruco_approach.compute_approach(pose["tvec"], pose["rvec"])
         else:
-            # No pose estimation (no camera calibration) — use visual centering
-            vx, vy, omega = self.aruco_detector.compute_approach_vector(pose)
+            # Visual-only approach (R3 — no camera calibration needed)
+            h, w = self._last_frame.shape[:2]
+            result = self.aruco_approach.compute_visual_approach(
+                target_marker, w, h
+            )
+            if result is None:
+                # Arrived
+                self._on_aruco_arrived()
+                return
+            vx, vy, omega = result
 
         self.uart.send(cmd_vector(int(vx), int(vy), int(omega)))
         self.line_follower.debug_vx = int(vx)
         self.line_follower.debug_vy = int(vy)
         self.line_follower.debug_omega = int(omega)
 
+    def _on_aruco_arrived(self):
+        """Handle arrival at ArUco marker."""
+        self.uart.send(cmd_stop())
+        self.uart.send(cmd_buzzer(1200, 300))  # R5: arrival beep
+        print(f">>> Arrived at ArUco marker {self._aruco_target_id}")
+        if self.speaker:
+            self.speaker.say("I have arrived at the marker. Your delivery is ready.")
+        self.transition(State.IDLE)
+
     def _tick_blocked(self):
-        """Stop and wait, then try rerouting."""
+        """Stop and wait for obstacle to clear (R4)."""
         self.uart.send(cmd_stop())
         self.line_follower.debug_vx = 0
         self.line_follower.debug_vy = 0
         self.line_follower.debug_omega = 0
 
-        # Check if path cleared
+        # Check if path cleared (both ultrasonic and camera)
+        ultrasonic_clear = not self._check_ultrasonic_obstacle()
+        camera_clear = True
         if self.obstacle_detector and self._last_frame is not None:
-            if self.obstacle_detector.is_path_clear(self._last_frame):
-                # Path cleared — resume following
+            camera_clear = self.obstacle_detector.is_path_clear(self._last_frame)
+
+        if ultrasonic_clear and camera_clear:
+            if self.speaker:
+                self.speaker.say("Path clear. Resuming.")
+            # Resume the previous state
+            if self._previous_state in (State.FOLLOWING, State.ENDPOINT, State.PARKING,
+                                         State.LOST_REVERSE, State.LOST_PIVOT):
                 self.line_follower.reset()
                 self.transition(State.FOLLOWING)
-                return
-
-        # Try rerouting after being blocked
-        self.transition(State.REROUTING)
+            elif self._previous_state == State.ARUCO_APPROACH:
+                self.transition(State.ARUCO_APPROACH)
+            elif self._previous_state == State.ARUCO_SEARCH:
+                self.transition(State.ARUCO_SEARCH)
+            else:
+                self.transition(State.IDLE)
 
     def _tick_rerouting(self):
         """Compute avoidance manoeuvre around obstacle."""
@@ -436,7 +584,6 @@ class AlfredFSM:
             vx, vy, omega = self.obstacle_avoider.compute_avoidance(obstacles)
 
             if not self.obstacle_avoider.is_rerouting():
-                # No more obstacles — resume following
                 self.line_follower.reset()
                 self.transition(State.FOLLOWING)
                 return
@@ -446,7 +593,6 @@ class AlfredFSM:
             self.line_follower.debug_vy = vy
             self.line_follower.debug_omega = omega
         else:
-            # No avoidance capability — just go back to following
             self.line_follower.reset()
             self.transition(State.FOLLOWING)
 
@@ -456,7 +602,6 @@ class AlfredFSM:
             self.transition(State.IDLE)
             return
 
-        # Detect persons and obstacles
         faces = []
         obstacles = []
         if self.person_detector and self._last_frame is not None:
@@ -465,6 +610,12 @@ class AlfredFSM:
         if self.obstacle_detector and self._last_frame is not None:
             obstacles = self.obstacle_detector.detect(self._last_frame)
             self._last_obstacles = obstacles
+
+        # R4: Also check ultrasonic
+        if self._check_ultrasonic_obstacle():
+            self.uart.send(cmd_stop())
+            # Wait briefly then resume
+            return
 
         if self.patrol_controller.should_approach_person():
             self.transition(State.PERSON_APPROACH)
@@ -486,28 +637,27 @@ class AlfredFSM:
         self._last_faces = faces
 
         if not faces:
-            # Lost the person
             self.uart.send(cmd_stop())
             self.transition(State.PATROL)
             return
 
-        # Approach the largest face
         face = max(faces, key=lambda f: f["bbox"][2] * f["bbox"][3])
         cx, cy = face["center"]
         bw, bh = face["bbox"][2], face["bbox"][3]
         frame_w = self.config.vision.resolution[0]
 
-        # Proportional approach
         face_area = bw * bh
-        target_area = 15000  # roughly "close enough"
+        target_area = 15000
 
         if face_area >= target_area:
             self.uart.send(cmd_stop())
+            self.uart.send(cmd_buzzer(800, 200))
             print(">>> Person reached")
+            if self.speaker:
+                self.speaker.say("Hello! How may I help you?")
             self.transition(State.IDLE)
             return
 
-        # Drive forward + steer toward face center
         lateral_error = (cx - frame_w / 2) / (frame_w / 2)
         vx = max(15, min(50, int(50 * (1.0 - face_area / target_area))))
         omega = int(-lateral_error * 40)
@@ -530,7 +680,6 @@ class AlfredFSM:
             self.transition(State.IDLE)
             return
 
-        # Simple dance pattern: alternate moves every 0.5s
         phase = int(elapsed / 0.5) % 6
         moves = [
             (0, 0, 60),     # spin right
@@ -546,7 +695,7 @@ class AlfredFSM:
         self.line_follower.debug_vy = vy
         self.line_follower.debug_omega = omega
 
-        # Trigger rainbow LEDs while dancing
+        # Rainbow LEDs already set via transition()
         if self.leds and elapsed < 0.1:
             self.leds.rainbow_cycle(speed=0.03, duration=self._dance_duration)
 
@@ -570,6 +719,7 @@ class AlfredFSM:
             print(">>> No camera available for photo")
 
         self._photo_taken = True
+        self.uart.send(cmd_buzzer(1500, 100))  # R5: shutter sound
         if self.speaker:
             self.speaker.say("photo")
 
@@ -591,10 +741,11 @@ class AlfredFSM:
 
     def _tick_sleeping(self):
         """Low-power sleep state. Wake on wake word."""
-        # Keep checking for wake word
         if self.voice_listener and self.voice_listener.is_wake_word_detected():
             if self.personality:
                 self.personality.express_greeting()
+            if self.speaker:
+                self.speaker.say("greet")
             self.transition(State.IDLE)
 
     # -- Main loop ----------------------------------------------------------

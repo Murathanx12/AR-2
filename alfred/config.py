@@ -62,33 +62,44 @@ class UARTConfig:
 
 
 @dataclass(frozen=True)
+class UltrasonicConfig:
+    """Ultrasonic sensor (HC-SR04) — R4 obstacle detection."""
+    trig_pin: int = 4     # ESP32 GPIO pin for trigger
+    echo_pin: int = 2     # ESP32 GPIO pin for echo
+    threshold_cm: float = 20.0  # obstacle detection threshold
+
+
+@dataclass(frozen=True)
 class VoiceConfig:
-    """Voice subsystem (stub defaults)."""
-    wake_phrase: str = "Hello Sonny"
-    whisper_model: str = "base"
+    """Voice subsystem."""
+    wake_phrase: str = "hello sonny"
+    vosk_model: str = "vosk-model-small-en-us-0.15"
+    vosk_model_path: str = ""  # auto-detect if empty
     piper_voice: str = "en_US-lessac-medium"
     listen_timeout: float = 5.0
 
 
 @dataclass(frozen=True)
 class VisionConfig:
-    """Vision subsystem (stub defaults)."""
+    """Vision subsystem."""
     camera_index: int = 0
-    resolution: Tuple[int, int] = (640, 480)
+    resolution: Tuple[int, int] = (800, 600)
     fps: int = 30
     aruco_dict: str = "DICT_4X4_50"
+    aruco_stop_size: int = 150  # pixel size at which marker = "arrived"
     bev_src_points: Tuple[Tuple[int, int], ...] = ()
     bev_dst_points: Tuple[Tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
 class ExpressionConfig:
-    """Expression subsystem (stub defaults)."""
+    """Expression subsystem."""
     oled_address: int = 0x3C
     oled_width: int = 128
     oled_height: int = 64
-    neopixel_pin: int = 18
-    neopixel_count: int = 12
+    neopixel_pin: int = 48    # ESP32 GPIO for NeoPixel data
+    neopixel_count: int = 4   # Number of NeoPixel LEDs
+    buzzer_pin: int = 46      # ESP32 GPIO for buzzer
     head_servo_channel: int = 0
     head_center_angle: int = 90
     head_range: Tuple[int, int] = (45, 135)
@@ -103,6 +114,7 @@ class AlfredConfig:
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     parking: ParkingConfig = field(default_factory=ParkingConfig)
     uart: UARTConfig = field(default_factory=UARTConfig)
+    ultrasonic: UltrasonicConfig = field(default_factory=UltrasonicConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     expression: ExpressionConfig = field(default_factory=ExpressionConfig)

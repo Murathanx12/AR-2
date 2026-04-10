@@ -1,4 +1,8 @@
-"""ArUco marker detection and pose estimation using OpenCV."""
+"""ArUco marker detection and pose estimation using OpenCV.
+
+Supports both calibrated pose estimation and visual-only (pixel-based) approach
+for when camera calibration is not available.
+"""
 
 import logging
 import math
@@ -10,8 +14,6 @@ try:
     import numpy as np
     _HAS_CV2 = True
 
-    # OpenCV 4.7+ uses cv2.aruco.getPredefinedDictionary
-    # Older versions use cv2.aruco.Dictionary_get
     _ARUCO_DICTS = {
         "DICT_4X4_50": cv2.aruco.DICT_4X4_50,
         "DICT_4X4_100": cv2.aruco.DICT_4X4_100,
@@ -24,9 +26,14 @@ except ImportError:
 
 
 class ArucoDetector:
-    """Detects ArUco markers and estimates their pose for navigation."""
+    """Detects ArUco markers and estimates their pose for navigation.
 
-    def __init__(self, dict_name="DICT_4X4_50", marker_size=0.05, camera_matrix=None, dist_coeffs=None):
+    Returns marker center, size (pixel), corners for both calibrated
+    and visual-only approach modes.
+    """
+
+    def __init__(self, dict_name="DICT_4X4_50", marker_size=0.05,
+                 camera_matrix=None, dist_coeffs=None):
         """
         Args:
             dict_name: ArUco dictionary name.
@@ -56,7 +63,8 @@ class ArucoDetector:
             frame: BGR image.
 
         Returns:
-            List of dicts: [{"id": int, "corners": ndarray(4,2)}, ...]
+            List of dicts with center and size for visual approach:
+            [{"id": int, "corners": ndarray(4,2), "center": (cx,cy), "size": float}, ...]
         """
         if not _HAS_CV2 or self._detector is None:
             return []
@@ -67,11 +75,37 @@ class ArucoDetector:
         results = []
         if ids is not None:
             for i, marker_id in enumerate(ids.flatten()):
+                pts = corners[i][0]  # shape (4, 2)
+                cx = float(np.mean(pts[:, 0]))
+                cy = float(np.mean(pts[:, 1]))
+                # Approximate size: mean of two adjacent side lengths
+                side1 = np.linalg.norm(pts[0] - pts[1])
+                side2 = np.linalg.norm(pts[1] - pts[2])
+                size = float((side1 + side2) / 2.0)
                 results.append({
                     "id": int(marker_id),
-                    "corners": corners[i][0],  # shape (4, 2)
+                    "corners": pts,
+                    "center": (cx, cy),
+                    "size": size,
                 })
         return results
+
+    def draw_markers(self, frame, markers):
+        """Draw detected markers on frame for debug display.
+
+        Args:
+            frame: BGR image to draw on (modified in-place).
+            markers: List from detect().
+        """
+        if not _HAS_CV2:
+            return
+        for m in markers:
+            pts = m["corners"].astype(int)
+            cv2.polylines(frame, [pts], True, (0, 255, 0), 2)
+            cx, cy = int(m["center"][0]), int(m["center"][1])
+            cv2.putText(frame, f"ID:{m['id']} sz:{m['size']:.0f}",
+                        (cx - 30, cy - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
     def estimate_pose(self, marker):
         """Estimate the 6-DOF pose of a detected marker.
@@ -80,8 +114,7 @@ class ArucoDetector:
             marker: Dict with "corners" key from detect().
 
         Returns:
-            Dict with "tvec" (translation) and "rvec" (rotation) as numpy arrays,
-            or None if camera not calibrated.
+            Dict with "tvec" and "rvec" as numpy arrays, or None if not calibrated.
         """
         if not _HAS_CV2 or self.camera_matrix is None:
             return None
@@ -100,9 +133,7 @@ class ArucoDetector:
         }
 
     def compute_approach_vector(self, pose):
-        """Compute a motion vector (vx, vy, omega) to approach the marker.
-
-        Uses proportional control on the marker's position relative to camera.
+        """Compute a motion vector (vx, vy, omega) to approach using pose estimation.
 
         Args:
             pose: Dict from estimate_pose() with "tvec" and "rvec".
@@ -115,14 +146,12 @@ class ArucoDetector:
 
         tx, ty, tz = pose["tvec"]
 
-        # Proportional gains
-        KP_FORWARD = 200.0   # drive forward proportional to distance
-        KP_LATERAL = 150.0   # strafe to centre marker
-        KP_ROTATION = 100.0  # rotate to face marker
+        KP_FORWARD = 200.0
+        KP_LATERAL = 150.0
+        KP_ROTATION = 100.0
 
-        # tz = depth (forward distance), tx = lateral offset, ty = vertical offset
-        vx = max(0, min(150, KP_FORWARD * tz))  # forward toward marker
-        vy = max(-100, min(100, -KP_LATERAL * tx))  # strafe to centre
-        omega = max(-100, min(100, -KP_ROTATION * math.atan2(tx, tz)))  # rotate to face
+        vx = max(0, min(150, KP_FORWARD * tz))
+        vy = max(-100, min(100, -KP_LATERAL * tx))
+        omega = max(-100, min(100, -KP_ROTATION * math.atan2(tx, tz)))
 
         return (vx, vy, omega)

@@ -1,6 +1,7 @@
 """Thread-safe UART bridge for ESP32 communication.
 
-Extracted from linefollower.py uart_thread() and serial init.
+Reads IR_STATUS and DIST (ultrasonic) messages from ESP32.
+Sends motor, LED, and buzzer commands to ESP32.
 """
 
 import threading
@@ -31,6 +32,8 @@ class UARTBridge:
         self._ser = None
         self._ir_status = 0
         self._ir_lock = threading.Lock()
+        self._distance_cm = -1.0  # ultrasonic distance, -1 = no reading
+        self._dist_lock = threading.Lock()
         self._running = False
         self._thread = None
         self._ping_interval = cfg.ping_interval
@@ -80,12 +83,29 @@ class UARTBridge:
             return [(v >> (4 - i)) & 1 for i in range(5)]
         return [(v >> i) & 1 for i in range(5)]
 
+    def get_distance(self) -> float:
+        """Return latest ultrasonic distance in cm, or -1 if no reading."""
+        with self._dist_lock:
+            return self._distance_cm
+
+    def is_obstacle_detected(self, threshold_cm: float = 20.0) -> bool:
+        """Check if an obstacle is within threshold distance.
+
+        Args:
+            threshold_cm: Distance threshold in cm.
+
+        Returns:
+            True if obstacle detected closer than threshold.
+        """
+        dist = self.get_distance()
+        return 0 < dist < threshold_cm
+
     @property
     def is_open(self) -> bool:
         return self._ser is not None and self._ser.is_open
 
     def _reader_loop(self):
-        """Daemon thread: read IR_STATUS lines and send periodic pings."""
+        """Daemon thread: read IR_STATUS and DIST lines, send periodic pings."""
         last_ping = time.monotonic()
         while self._running:
             try:
@@ -97,6 +117,14 @@ class UARTBridge:
                             _, value_str = text.split(":", 1)
                             with self._ir_lock:
                                 self._ir_status = int(value_str) & 0x1F
+                        except ValueError:
+                            pass
+                    elif text.startswith("DIST:"):
+                        try:
+                            _, value_str = text.split(":", 1)
+                            dist = float(value_str)
+                            with self._dist_lock:
+                                self._distance_cm = dist
                         except ValueError:
                             pass
 

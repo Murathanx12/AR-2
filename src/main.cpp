@@ -1,32 +1,31 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
+#include <Adafruit_NeoPixel.h>
 #include <stdio.h>
 
 // ---------------- Motor pin definitions (ORIGINAL — DO NOT CHANGE) --------
-#define DIRA1 3 
+#define DIRA1 3
 #define DIRA2 10  // A motor (left front)
 
-#define DIRB1 11 
+#define DIRB1 11
 #define DIRB2 12  // B motor (right front)
 
-#define DIRC1 13 
+#define DIRC1 13
 #define DIRC2 14  // C motor (left rear)
 
-#define DIRD1 21  
+#define DIRD1 21
 #define DIRD2 47  // D motor (right rear)
 
 #define RXD2 16  // GPIO16 as RX
 #define TXD2 17  // GPIO17 as TX
 
 // ---------------- IR Sensor pins (5-sensor arc on front semicircle) --------
-// Sensors arranged on a semicircle from the front wheel shaft:
 //         [N]  North (center front)
 //        /   \
 //     [NW]   [NE]
 //     /         \
 //   [W]         [E]
 //   (left)      (right)
-//
 #define IR_W_PIN   5   // bit0 = West (far left)        — Sensor 1, GPIO5
 #define IR_NW_PIN  6   // bit1 = Northwest              — Sensor 2, GPIO6
 #define IR_N_PIN   7   // bit2 = North (center front)   — Sensor 3, GPIO7
@@ -34,6 +33,27 @@
 #define IR_E_PIN   45  // bit4 = East (far right)       — Sensor 5, GPIO45
 
 const int irPins[5] = {IR_W_PIN, IR_NW_PIN, IR_N_PIN, IR_NE_PIN, IR_E_PIN};
+
+// ---------------- Ultrasonic sensor (HC-SR04) — R4 obstacle detection ------
+#define TRIG_PIN 4   // GPIO4 — trigger
+#define ECHO_PIN 2   // GPIO2 — echo (use voltage divider for 3.3V!)
+
+// ---------------- NeoPixel LEDs — R5 intention indicators ------------------
+#define NEOPIXEL_PIN 48   // GPIO48 — data line
+#define NUM_LEDS     4    // Number of NeoPixel LEDs
+
+Adafruit_NeoPixel strip(NUM_LEDS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
+// LED animation state
+uint8_t led_pattern = 0;  // 0=solid, 1=pulse, 2=rainbow, 3=blink, 4=breathe
+uint8_t led_r = 0, led_g = 0, led_b = 0;
+unsigned long lastLedUpdate = 0;
+const unsigned long LED_UPDATE_INTERVAL = 30; // ms
+
+// ---------------- Buzzer — R5 audio indicator ------------------------------
+#define BUZZER_PIN 46  // GPIO46
+
+unsigned long buzzerEndTime = 0;
 
 // ---------------- Motor control macros (ORIGINAL — DO NOT CHANGE) ---------
 // A = Left front
@@ -66,117 +86,91 @@ int Motor_PWM = 160;
 
 HardwareSerial uart2(2); // UART2 for Pi communication
 
-// ---------------- IR broadcast interval ----------------
+// ---------------- Broadcast intervals ----------------
 unsigned long lastIrSend = 0;
 const unsigned long IR_SEND_INTERVAL = 50;  // ms (20 Hz)
+
+unsigned long lastDistSend = 0;
+const unsigned long DIST_SEND_INTERVAL = 100;  // ms (10 Hz)
 
 // ============================================================
 // Low-level motion functions
 // ============================================================
 
-//    ↑A-----B↑   
-//     |  ↑  |
-//    ↑C-----D↑
 void ADVANCE()
 {
-  MOTORA_FORWARD(Motor_PWM); MOTORB_FORWARD(Motor_PWM);    
-  MOTORC_FORWARD(Motor_PWM); MOTORD_FORWARD(Motor_PWM);    
+  MOTORA_FORWARD(Motor_PWM); MOTORB_FORWARD(Motor_PWM);
+  MOTORC_FORWARD(Motor_PWM); MOTORD_FORWARD(Motor_PWM);
 }
 
-//    ↓A-----B↓ 
-//     |  ↓  |
-//    ↓C-----D↓
 void BACK()
 {
   MOTORA_BACKOFF(Motor_PWM); MOTORB_BACKOFF(Motor_PWM);
   MOTORC_BACKOFF(Motor_PWM); MOTORD_BACKOFF(Motor_PWM);
 }
 
-// STRAFE left (mecanum lateral movement — A/D keys in manual mode)
-//    ↓A-----B↑   
-//     |  ←  |
-//    ↑C-----D↓
 void LEFT_2()
 {
   MOTORA_BACKOFF(Motor_PWM); MOTORB_FORWARD(Motor_PWM);
   MOTORC_FORWARD(Motor_PWM); MOTORD_BACKOFF(Motor_PWM);
 }
 
-// STRAFE right (mecanum lateral movement — A/D keys in manual mode)
-//    ↑A-----B↓   
-//     |  →  |
-//    ↓C-----D↑
 void RIGHT_2()
 {
   MOTORA_FORWARD(Motor_PWM); MOTORB_BACKOFF(Motor_PWM);
   MOTORC_BACKOFF(Motor_PWM); MOTORD_FORWARD(Motor_PWM);
 }
 
-// ============================================================
-// TANK ROTATION — Q/E keys and used by line-following FSM
-// Both sides work in OPPOSITE directions → spins from center
-// ============================================================
-
-// ROTATE LEFT (CCW):
-// Left side (A,C) go BACKWARD, Right side (B,D) go FORWARD
-//    ↓A-----B↑
-//     | CCW  |
-//    ↓C-----D↑
 void TURNLEFT()
 {
-  MOTORA_BACKOFF(Motor_PWM);   // A (left front)  = backward
-  MOTORB_FORWARD(Motor_PWM);   // B (right front)  = forward
-  MOTORC_BACKOFF(Motor_PWM);   // C (left rear)   = backward
-  MOTORD_FORWARD(Motor_PWM);   // D (right rear)   = forward
+  MOTORA_BACKOFF(Motor_PWM);
+  MOTORB_FORWARD(Motor_PWM);
+  MOTORC_BACKOFF(Motor_PWM);
+  MOTORD_FORWARD(Motor_PWM);
 }
 
-// ROTATE RIGHT (CW):
-// Left side (A,C) go FORWARD, Right side (B,D) go BACKWARD
-//    ↑A-----B↓
-//     |  CW  |
-//    ↑C-----D↓
 void TURNRIGHT()
 {
-  MOTORA_FORWARD(Motor_PWM);   // A (left front)  = forward
-  MOTORB_BACKOFF(Motor_PWM);   // B (right front)  = backward
-  MOTORC_FORWARD(Motor_PWM);   // C (left rear)   = forward
-  MOTORD_BACKOFF(Motor_PWM);   // D (right rear)   = backward
+  MOTORA_FORWARD(Motor_PWM);
+  MOTORB_BACKOFF(Motor_PWM);
+  MOTORC_FORWARD(Motor_PWM);
+  MOTORD_BACKOFF(Motor_PWM);
 }
 
-// SIDE PIVOT — front wheels drive hard in opposite directions,
-// rear wheels crawl or stay still. Pivots around the rear axle center.
-// direction > 0 = pivot right, direction <= 0 = pivot left
-// rearFactor: 0-100 how much the rear wheels contribute (0 = still, 100 = same as front)
-//
-// Pivot RIGHT:
-//    ↑A-----B↓   (front wheels fast, opposite dirs)
-//     |      |
-//    ↑C-----D↓   (rear wheels slow or stopped)
-//
-// Pivot LEFT:
-//    ↓A-----B↑
-//     |      |
-//    ↓C-----D↑
+void SPINLEFT(int pwm)
+{
+  MOTORA_BACKOFF(pwm);
+  MOTORB_FORWARD(pwm);
+  MOTORC_BACKOFF(pwm);
+  MOTORD_FORWARD(pwm);
+}
+
+void SPINRIGHT(int pwm)
+{
+  MOTORA_FORWARD(pwm);
+  MOTORB_BACKOFF(pwm);
+  MOTORC_FORWARD(pwm);
+  MOTORD_BACKOFF(pwm);
+}
+
 void SIDEPIVOT(int frontPwm, int rearPwm, int direction)
 {
   if (direction > 0) {
-    // Pivot RIGHT: left side forward, right side backward
-    MOTORA_FORWARD(frontPwm);    // A (left front) = forward fast
-    MOTORB_BACKOFF(frontPwm);    // B (right front) = backward fast
+    MOTORA_FORWARD(frontPwm);
+    MOTORB_BACKOFF(frontPwm);
     if (rearPwm > 0) {
-      MOTORC_FORWARD(rearPwm);   // C (left rear) = forward slow
-      MOTORD_BACKOFF(rearPwm);   // D (right rear) = backward slow
+      MOTORC_FORWARD(rearPwm);
+      MOTORD_BACKOFF(rearPwm);
     } else {
       MOTORC_STOP(0);
       MOTORD_STOP(0);
     }
   } else {
-    // Pivot LEFT: left side backward, right side forward
-    MOTORA_BACKOFF(frontPwm);    // A (left front) = backward fast
-    MOTORB_FORWARD(frontPwm);    // B (right front) = forward fast
+    MOTORA_BACKOFF(frontPwm);
+    MOTORB_FORWARD(frontPwm);
     if (rearPwm > 0) {
-      MOTORC_BACKOFF(rearPwm);   // C (left rear) = backward slow
-      MOTORD_FORWARD(rearPwm);   // D (right rear) = forward slow
+      MOTORC_BACKOFF(rearPwm);
+      MOTORD_FORWARD(rearPwm);
     } else {
       MOTORC_STOP(0);
       MOTORD_STOP(0);
@@ -184,16 +178,13 @@ void SIDEPIVOT(int frontPwm, int rearPwm, int direction)
   }
 }
 
-//    =A-----B=  
-//     |  =  |
-//    =C-----D=
 void STOP()
 {
   MOTORA_STOP(Motor_PWM); MOTORB_STOP(Motor_PWM);
   MOTORC_STOP(Motor_PWM); MOTORD_STOP(Motor_PWM);
 }
 
-// ---------------- Optional: other moves kept from original ----------------
+// Optional moves kept from original
 void LEFT_1()
 {
   MOTORA_STOP(Motor_PWM);    MOTORB_FORWARD(Motor_PWM);
@@ -218,7 +209,6 @@ void RIGHT_3()
   MOTORC_BACKOFF(Motor_PWM); MOTORD_STOP(Motor_PWM);
 }
 
-// Old one-sided pivots kept for reference but NOT used
 void TURNLEFT_1()
 {
   MOTORA_STOP(Motor_PWM); MOTORB_FORWARD(Motor_PWM);
@@ -237,7 +227,7 @@ void TURNRIGHT_1()
 #ifdef LOG_DEBUG
 #define M_LOG SERIAL.print
 #else
-#define M_LOG 
+#define M_LOG
 #endif
 
 // ---------------- IO init ----------------
@@ -274,7 +264,6 @@ void back(int speed)
   if (Motor_PWM == 0) { STOP(); } else { BACK(); }
 }
 
-// Strafe left/right — only used by A/D manual keys
 void left2(int speed)
 {
   Motor_PWM = speedToPwm(speed);
@@ -287,7 +276,6 @@ void right2(int speed)
   if (Motor_PWM == 0) { STOP(); } else { RIGHT_2(); }
 }
 
-// Tank rotation — used by Q/E keys AND by line-following FSM
 void turnleft(int speed)
 {
   Motor_PWM = speedToPwm(speed);
@@ -300,9 +288,18 @@ void turnright(int speed)
   if (Motor_PWM == 0) { STOP(); } else { TURNRIGHT(); }
 }
 
-// Side pivot — front wheels oppose at high speed, rear crawl or stop
-// direction: 1 = right, -1 = left
-// rearPercent: 0-100 how much rear wheels contribute
+void spinleft(int speed)
+{
+  int pwm = speedToPwm(speed);
+  if (pwm == 0) { STOP(); } else { SPINLEFT(pwm); }
+}
+
+void spinright(int speed)
+{
+  int pwm = speedToPwm(speed);
+  if (pwm == 0) { STOP(); } else { SPINRIGHT(pwm); }
+}
+
 void sidepivot(int frontSpeed, int rearPercent, int direction)
 {
   int fp = speedToPwm(abs(frontSpeed));
@@ -311,8 +308,6 @@ void sidepivot(int frontSpeed, int rearPercent, int direction)
   SIDEPIVOT(fp, rp, direction);
 }
 
-// Differential steering — used by auto mode for smooth curves
-// Each side can have independent speed; negative = reverse
 void curve(int leftSpeed, int rightSpeed)
 {
   int lp = speedToPwm(abs(leftSpeed));
@@ -339,6 +334,89 @@ uint8_t readIrStatus()
     }
   }
   return val;
+}
+
+// ============================================================
+// Ultrasonic sensor (HC-SR04) — R4 obstacle detection
+// ============================================================
+float readUltrasonic()
+{
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout (~5m max)
+  if (duration == 0) return -1.0; // timeout = no echo
+  return duration * 0.034 / 2.0;  // convert to cm
+}
+
+// ============================================================
+// NeoPixel LED control — R5 intention indicators
+// ============================================================
+void setLedSolid(uint8_t r, uint8_t g, uint8_t b)
+{
+  for (int i = 0; i < NUM_LEDS; i++) {
+    strip.setPixelColor(i, strip.Color(r, g, b));
+  }
+  strip.show();
+}
+
+void updateLedAnimation()
+{
+  unsigned long now = millis();
+  if (now - lastLedUpdate < LED_UPDATE_INTERVAL) return;
+  lastLedUpdate = now;
+
+  switch (led_pattern) {
+    case 0: // solid — already set
+      break;
+    case 1: { // pulse
+      uint8_t brightness = (uint8_t)(128 + 127 * sin(now / 500.0 * 3.14159));
+      for (int i = 0; i < NUM_LEDS; i++) {
+        strip.setPixelColor(i, strip.Color(
+          led_r * brightness / 255,
+          led_g * brightness / 255,
+          led_b * brightness / 255
+        ));
+      }
+      strip.show();
+      break;
+    }
+    case 2: { // rainbow
+      uint16_t hue = (now / 10) % 65536;
+      for (int i = 0; i < NUM_LEDS; i++) {
+        strip.setPixelColor(i, strip.gamma32(
+          strip.ColorHSV(hue + (i * 65536 / NUM_LEDS))
+        ));
+      }
+      strip.show();
+      break;
+    }
+    case 3: { // blink
+      bool on = (now / 500) % 2 == 0;
+      if (on) {
+        setLedSolid(led_r, led_g, led_b);
+      } else {
+        setLedSolid(0, 0, 0);
+      }
+      break;
+    }
+    case 4: { // breathe
+      float t = (now % 3000) / 3000.0;
+      uint8_t brightness = (uint8_t)(255 * (t < 0.5 ? t * 2 : (1.0 - t) * 2));
+      for (int i = 0; i < NUM_LEDS; i++) {
+        strip.setPixelColor(i, strip.Color(
+          led_r * brightness / 255,
+          led_g * brightness / 255,
+          led_b * brightness / 255
+        ));
+      }
+      strip.show();
+      break;
+    }
+  }
 }
 
 // ============================================================
@@ -372,10 +450,6 @@ void driveWheel(char wheel, int speed)
   }
 }
 
-// vx = forward (+) / backward (-)
-// vy = strafe right (+) / strafe left (-)
-// omega = rotate CW/right (+) / rotate CCW/left (-)
-// All values: -100 to 100
 void vectorDrive(int vx, int vy, int omega)
 {
   int fl = vx + vy + omega;   // Motor A (left front)
@@ -383,7 +457,6 @@ void vectorDrive(int vx, int vy, int omega)
   int rl = vx - vy + omega;   // Motor C (left rear)
   int rr = vx + vy - omega;   // Motor D (right rear)
 
-  // Normalize: if any wheel exceeds 100, scale all down proportionally
   int maxVal = max(max(abs(fl), abs(fr)), max(abs(rl), abs(rr)));
   if (maxVal > 100) {
     fl = fl * 100 / maxVal;
@@ -419,15 +492,18 @@ void handleCommand(const String& commandName, const String& paramsStr)
   } else if (commandName == "mv_rev") {
     back(speed);
   } else if (commandName == "mv_left") {
-    left2(speed);                    // STRAFE (A key) — mecanum lateral
+    left2(speed);
   } else if (commandName == "mv_right") {
-    right2(speed);                   // STRAFE (D key) — mecanum lateral
+    right2(speed);
   } else if (commandName == "mv_turnleft") {
-    turnleft(speed);                 // TANK ROTATE (Q key) — both sides opposite
+    turnleft(speed);
   } else if (commandName == "mv_turnright") {
-    turnright(speed);                // TANK ROTATE (E key) — both sides opposite
+    turnright(speed);
+  } else if (commandName == "mv_spinleft") {
+    spinleft(speed);
+  } else if (commandName == "mv_spinright") {
+    spinright(speed);
   } else if (commandName == "mv_sidepivot") {
-    // Format: mv_sidepivot:frontSpeed,rearPercent,direction
     int c1 = paramsStr.indexOf(',');
     int c2 = paramsStr.indexOf(',', c1 + 1);
     if (c1 != -1 && c2 != -1) {
@@ -444,7 +520,6 @@ void handleCommand(const String& commandName, const String& paramsStr)
       curve(ls, rs);
     }
   } else if (commandName == "mv_vector") {
-    // Format: mv_vector:vx,vy,omega
     int c1 = paramsStr.indexOf(',');
     int c2 = paramsStr.indexOf(',', c1 + 1);
     if (c1 != -1 && c2 != -1) {
@@ -455,7 +530,36 @@ void handleCommand(const String& commandName, const String& paramsStr)
     }
   } else if (commandName == "stop") {
     STOP();
-  } else {
+  }
+  // --- R5 LED commands ---
+  else if (commandName == "led") {
+    // Format: led:r,g,b
+    int c1 = paramsStr.indexOf(',');
+    int c2 = paramsStr.indexOf(',', c1 + 1);
+    if (c1 != -1 && c2 != -1) {
+      led_r = paramsStr.substring(0, c1).toInt();
+      led_g = paramsStr.substring(c1 + 1, c2).toInt();
+      led_b = paramsStr.substring(c2 + 1).toInt();
+      led_pattern = 0; // solid mode
+      setLedSolid(led_r, led_g, led_b);
+    }
+  }
+  else if (commandName == "led_pattern") {
+    // Format: led_pattern:id
+    led_pattern = paramsStr.toInt();
+  }
+  // --- R5 Buzzer command ---
+  else if (commandName == "buzzer") {
+    // Format: buzzer:freq,duration_ms
+    int ci = paramsStr.indexOf(',');
+    if (ci != -1) {
+      int freq = paramsStr.substring(0, ci).toInt();
+      int dur = paramsStr.substring(ci + 1).toInt();
+      tone(BUZZER_PIN, freq, dur);
+      buzzerEndTime = millis() + dur;
+    }
+  }
+  else {
     SERIAL.println("Unknown command");
   }
 }
@@ -475,8 +579,25 @@ void setup()
     pinMode(irPins[i], INPUT);
   }
 
-  uart2.println("ESP32 Ready to communicate with Raspberry Pi");
+  // Ultrasonic sensor
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  // NeoPixel LEDs
+  strip.begin();
+  strip.setBrightness(80);  // 0-255, keep moderate to save power
+  strip.show();  // all off
+
+  // Buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  uart2.println("ESP32 Ready (V4 with ultrasonic + LED + buzzer)");
   IO_init();
+
+  // Startup indicator: flash blue
+  setLedSolid(0, 0, 255);
+  delay(500);
+  setLedSolid(0, 0, 0);
 }
 
 unsigned long lastPingTime = 0;
@@ -502,12 +623,32 @@ void loop()
     }
   }
 
-  // --- Broadcast IR status to Raspberry Pi at 20 Hz ---
   unsigned long now = millis();
+
+  // --- Broadcast IR status to Raspberry Pi at 20 Hz ---
   if (now - lastIrSend >= IR_SEND_INTERVAL) {
     uint8_t ir = readIrStatus();
     uart2.println("IR_STATUS:" + String(ir));
     lastIrSend = now;
+  }
+
+  // --- Broadcast ultrasonic distance at 10 Hz ---
+  if (now - lastDistSend >= DIST_SEND_INTERVAL) {
+    float dist = readUltrasonic();
+    if (dist >= 0) {
+      uart2.print("DIST:");
+      uart2.println(dist, 1);
+    }
+    lastDistSend = now;
+  }
+
+  // --- Update LED animation ---
+  updateLedAnimation();
+
+  // --- Stop buzzer when duration elapsed ---
+  if (buzzerEndTime > 0 && now >= buzzerEndTime) {
+    noTone(BUZZER_PIN);
+    buzzerEndTime = 0;
   }
 
   // --- Periodic heartbeat ---

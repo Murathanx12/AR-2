@@ -48,3 +48,31 @@ def cmd_curve(left_speed: int, right_speed: int) -> str:
 
 def cmd_side_pivot(front_speed: int, rear_percent: int, direction: int) -> str:
     return _format("mv_sidepivot", front_speed, rear_percent, direction)
+
+
+def cmd_spin_left(speed: int) -> str:
+    return _format("mv_spinleft", speed)
+
+
+def cmd_spin_right(speed: int) -> str:
+    return _format("mv_spinright", speed)
+
+
+# --- R5 Indicator commands (NEW) ---
+
+def cmd_led(r: int, g: int, b: int) -> str:
+    """Set NeoPixel LED color (all LEDs)."""
+    return _format("led", int(r), int(g), int(b))
+
+
+def cmd_led_pattern(pattern_id: int) -> str:
+    """Set LED animation pattern.
+
+    Pattern IDs: 0=off, 1=pulse, 2=rainbow, 3=blink, 4=breathe
+    """
+    return _format("led_pattern", int(pattern_id))
+
+
+def cmd_buzzer(freq: int, duration_ms: int) -> str:
+    """Play a tone on the buzzer."""
+    return _format("buzzer", int(freq), int(duration_ms))
