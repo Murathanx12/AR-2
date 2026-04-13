@@ -18,23 +18,42 @@ except (ImportError, Exception):
 # Detect available TTS engine
 _TTS_ENGINE = None
 
+def _find_piper_model():
+    """Search for a piper .onnx voice model in common locations."""
+    import glob as _glob
+    search_paths = [
+        os.path.join(os.getcwd(), "piper-voices", "*.onnx"),
+        os.path.expanduser("~/.local/share/piper-voices/**/*.onnx"),
+        os.path.join(os.getcwd(), "*.onnx"),
+    ]
+    for pattern in search_paths:
+        matches = _glob.glob(pattern, recursive=True)
+        if matches:
+            return matches[0]
+    return None
+
+
 def _detect_tts():
     global _TTS_ENGINE
     if _TTS_ENGINE is not None:
         return _TTS_ENGINE
 
-    # Try piper first
+    # Try piper first — but only if a model file actually exists
     try:
-        result = subprocess.run(["piper", "--help"], capture_output=True, timeout=3)
-        _TTS_ENGINE = "piper"
-        logger.info("TTS engine: piper")
-        return _TTS_ENGINE
+        subprocess.run(["piper", "--help"], capture_output=True, timeout=3)
+        model = _find_piper_model()
+        if model:
+            _TTS_ENGINE = "piper"
+            logger.info(f"TTS engine: piper (model: {model})")
+            return _TTS_ENGINE
+        else:
+            logger.info("piper installed but no .onnx model found, skipping")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
     # Try espeak-ng
     try:
-        result = subprocess.run(["espeak-ng", "--version"], capture_output=True, timeout=3)
+        subprocess.run(["espeak-ng", "--version"], capture_output=True, timeout=3)
         _TTS_ENGINE = "espeak-ng"
         logger.info("TTS engine: espeak-ng")
         return _TTS_ENGINE
@@ -43,7 +62,7 @@ def _detect_tts():
 
     # Try espeak
     try:
-        result = subprocess.run(["espeak", "--version"], capture_output=True, timeout=3)
+        subprocess.run(["espeak", "--version"], capture_output=True, timeout=3)
         _TTS_ENGINE = "espeak"
         logger.info("TTS engine: espeak")
         return _TTS_ENGINE
@@ -78,13 +97,13 @@ class Speaker:
         "blocked": "Something is in the way. Let me find another route.",
     }
 
-    def __init__(self, piper_voice="en_US-lessac-medium", assets_dir=None):
+    def __init__(self, piper_voice=None, assets_dir=None):
         """
         Args:
-            piper_voice: Piper TTS voice model name.
+            piper_voice: Path to piper .onnx model, or None to auto-detect.
             assets_dir: Directory containing sound files. Defaults to assets/sounds/.
         """
-        self._piper_voice = piper_voice
+        self._piper_voice = piper_voice or _find_piper_model()
         self._assets_dir = assets_dir or os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "assets", "sounds"
         )

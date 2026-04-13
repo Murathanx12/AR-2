@@ -379,6 +379,28 @@ class AlfredFSM:
         intent, confidence = self.intent_classifier.classify(text)
         print(f"[Voice] '{text}' -> {intent} ({confidence:.1f})")
 
+        # Confirm what we heard back to the user
+        INTENT_CONFIRMATIONS = {
+            "follow_track": "Got it. Following the track.",
+            "go_to_aruco":  "Got it. Searching for the marker.",
+            "dance":        "Got it. Time to dance!",
+            "take_photo":   "Got it. Taking a photo.",
+            "come_here":    "Got it. Coming to you.",
+            "stop":         "Got it. Stopping now.",
+            "sleep":        "Got it. Going to sleep.",
+            "patrol":       "Got it. Starting patrol.",
+            "confirm":      "Confirmed.",
+            "cancel":       "Cancelled.",
+            "chat":         None,  # conversation handles its own response
+        }
+
+        # Speak confirmation before acting
+        confirmation = INTENT_CONFIRMATIONS.get(intent)
+        if confirmation and self.speaker:
+            self.speaker.say(confirmation)
+        elif intent == "unknown" and self.speaker:
+            self.speaker.say(f"I heard {text}, but I don't understand that command.")
+
         # EC3: Handle chat/conversation intent
         if intent == "chat" and self.conversation:
             self.conversation.handle(text)
@@ -405,12 +427,9 @@ class AlfredFSM:
                 self._photo_taken = False
             self.transition(target)
         elif intent == "confirm":
-            # Confirm can be used in selection modes
             pass
         elif intent == "cancel":
             self.transition(State.IDLE)
-        elif self.personality:
-            self.personality.express_confusion()
 
     # -- State tick handlers ------------------------------------------------
 
