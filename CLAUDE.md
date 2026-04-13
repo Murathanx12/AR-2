@@ -5,7 +5,7 @@ Wake phrase: "Hello Sonny"
 
 Architecture
 
-ESP32-S3: Motor PWM + 5x IR sensor reading at 20Hz + HC-SR04 ultrasonic at 10Hz + NeoPixel LEDs + buzzer. Firmware: src/main.cpp (PlatformIO).
+ESP32-S3: Motor PWM + 5x IR sensor reading at 20Hz + HC-SR04 ultrasonic at 10Hz + NeoPixel LEDs + buzzer. Firmware: esp32/src/main.cpp (PlatformIO).
 Raspberry Pi 5: Decision engine. Python. FSM + vision + voice + expression.
 UART: 115200 baud on /dev/ttyAMA2. Pi sends mv_vector:vx,vy,omega\n, ESP sends IR_STATUS:XX\n and DIST:XX.X\n.
 Mecanum IK: FL=vx+vy+omega, FR=vx-vy-omega, RL=vx-vy+omega, RR=vx+vy-omega. PWM 50-200 from 0-100%.
@@ -40,7 +40,7 @@ DIST:XX.X (ultrasonic cm, 10Hz)
 
 Current State
 
-Minilab5/linefollower.py — Working V3 line follower (legacy, untouched).
+legacy/ — Old V1-V3 code (linefollower.py, advancedmovement.py, etc).
 V4 modular alfred/ package is live. Entry point: Minilab5/alfred.py.
 
 V4 Modules
@@ -57,15 +57,12 @@ alfred/utils/ — logging (colored), timing (RateTimer, Stopwatch).
 
 Key Commands
 ```bash
-# Build ESP32 firmware (now includes ultrasonic + NeoPixel + buzzer)
-pio run --target upload
+# Build ESP32 firmware (from Windows PC)
+cd esp32 && pio run --target upload
 
-# Run Sonny V4
+# Run Sonny V4 (on Raspberry Pi)
 python Minilab5/alfred.py
 python Minilab5/alfred.py --headless --no-voice --no-camera
-
-# Run legacy V3 line follower
-python Minilab5/linefollower.py
 
 # Run tests
 python -m pytest tests/

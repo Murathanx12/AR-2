@@ -3,6 +3,8 @@
 set -euo pipefail
 
 echo "=== Alfred/Sonny V4 — Pi Setup ==="
+echo "This script sets up the Raspberry Pi environment."
+echo "Run from the repo root directory."
 
 # System packages
 sudo apt-get update
