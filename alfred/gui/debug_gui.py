@@ -199,7 +199,7 @@ class DebugGUI:
         self._screen.blit(st_text, (self.W - st_w - 4, 13))
 
         # Voice indicator
-        voice_active = fsm and fsm.voice is not None
+        voice_active = fsm and fsm.voice_listener is not None
         voice_color = (0, 180, 255) if voice_active else (60, 60, 70)
         voice_label = "MIC ON" if voice_active else "MIC OFF"
         self._screen.blit(self._fonts['xs'].render(voice_label, True, voice_color), (pill_rect.right + 20, 18))

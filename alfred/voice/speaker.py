@@ -140,10 +140,18 @@ class Speaker:
                         shell=True, timeout=30
                     )
                 elif engine in ("espeak-ng", "espeak"):
-                    subprocess.run(
-                        [engine, "-s", "150", text],
-                        timeout=30, capture_output=True
-                    )
+                    # Try mbrola voice first (much more natural)
+                    try:
+                        subprocess.run(
+                            [engine, "-v", "mb-us1", "-s", "160", "-p", "40", text],
+                            timeout=30, capture_output=True, check=True
+                        )
+                    except (subprocess.CalledProcessError, FileNotFoundError):
+                        # Fallback to default espeak voice
+                        subprocess.run(
+                            [engine, "-s", "150", text],
+                            timeout=30, capture_output=True
+                        )
                 else:
                     logger.info(f"[TTS] {text}")
             except subprocess.TimeoutExpired:
