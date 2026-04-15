@@ -57,7 +57,7 @@ class EyeController:
         self._x = 0.5  # gaze x: 0=left, 1=right
         self._y = 0.5  # gaze y: 0=up, 1=down
         self._blink_state = 0.0  # 0=open, 1=fully closed
-        self._blink_time = 0.0
+        self._blink_time = time.monotonic()
         self._last_blink = time.monotonic()
         self._auto_blink_interval = 4.0  # seconds between auto blinks
         self._frame = None

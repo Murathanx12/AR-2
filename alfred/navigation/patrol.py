@@ -45,10 +45,10 @@ class PatrolController:
         now = time.monotonic()
 
         # Check for persons
-        if persons:
+        if persons and len(persons) > 0:
             self._person_detected = True
             # Target the closest (largest) face
-            best = max(persons, key=lambda p: p.get("bbox", (0,0,0,0))[2] * p.get("bbox", (0,0,0,0))[3])
+            best = max(persons, key=lambda p: p.get("bbox", (0, 0, 0, 0))[2] * p.get("bbox", (0, 0, 0, 0))[3])
             self._person_center = best.get("center")
         else:
             self._person_detected = False
@@ -68,9 +68,9 @@ class PatrolController:
         # Obstacle reaction: bias away from obstacles
         if obstacles:
             for obs in obstacles:
-                cx, _ = obs.get("center", (320, 480))
-                # If obstacle on left, turn right and vice versa
-                if cx < 320:
+                cx, _ = obs.get("center", (400, 300))
+                # If obstacle on left half, turn right and vice versa
+                if cx < 400:  # approximate center for 800px wide frame
                     omega += 20
                 else:
                     omega -= 20

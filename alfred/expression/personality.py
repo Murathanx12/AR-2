@@ -84,9 +84,9 @@ class PersonalityEngine:
             if self._eyes:
                 # Gaze tracking: look at detected person
                 faces = context.get("faces")
-                if faces:
+                if faces and len(faces) > 0:
                     face = faces[0]
-                    cx, cy = face.get("center", (0.5, 0.5))
+                    cx, cy = face.get("center", (320, 240))
                     frame_w = context.get("frame_width", 640)
                     frame_h = context.get("frame_height", 480)
                     self._eyes.look_at(cx / frame_w, cy / frame_h)
@@ -98,8 +98,9 @@ class PersonalityEngine:
 
             # Update head tracking
             if self._head:
-                if expr["head"] == "track" and context.get("faces"):
-                    self._head.look_at_person(context["faces"][0])
+                faces = context.get("faces")
+                if expr["head"] == "track" and faces and len(faces) > 0:
+                    self._head.look_at_person(faces[0])
                 elif expr["head"] == "center":
                     self._head.center()
 

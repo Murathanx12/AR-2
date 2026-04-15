@@ -217,8 +217,8 @@ class VoiceListener:
                     wav_buffer, language="en", beam_size=1,
                 )
                 return " ".join(s.text.strip() for s in segments).lower().strip()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"faster-whisper transcribe failed: {e}")
 
         # openai-whisper API
         try:
@@ -309,14 +309,16 @@ class VoiceListener:
 
         print(f"[Voice] Ready ({self._engine}). Say 'Hello Sonny' to wake up.")
 
-        if use_whisper:
-            self._whisper_loop(stream, p)
-        else:
-            self._vosk_loop(stream, p, vosk_rec)
-
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
+        try:
+            if use_whisper:
+                self._whisper_loop(stream, p)
+            else:
+                self._vosk_loop(stream, p, vosk_rec)
+        finally:
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+            print("[Voice] Listener stopped")
 
     def _whisper_loop(self, stream, pyaudio_instance):
         """Main loop using Whisper with energy-based VAD."""

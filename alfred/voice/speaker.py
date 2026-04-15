@@ -7,13 +7,14 @@ import os
 
 logger = logging.getLogger(__name__)
 
+_HAS_PYGAME = False
 try:
     import pygame
     if not pygame.mixer.get_init():
         pygame.mixer.init()
     _HAS_PYGAME = True
 except (ImportError, Exception):
-    _HAS_PYGAME = False
+    pass
 
 # Detect available TTS engine
 _TTS_ENGINE = None
@@ -126,10 +127,19 @@ class Speaker:
             try:
                 engine = _detect_tts()
                 if engine == "piper":
-                    subprocess.run(
-                        f'echo "{text}" | piper --model {self._piper_voice} --output-raw | aplay -r 22050 -f S16_LE -c 1',
-                        shell=True, timeout=30
+                    # Pipe text safely without shell=True
+                    piper_proc = subprocess.Popen(
+                        ["piper", "--model", self._piper_voice, "--output-raw"],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     )
+                    aplay_proc = subprocess.Popen(
+                        ["aplay", "-r", "22050", "-f", "S16_LE", "-c", "1"],
+                        stdin=piper_proc.stdout, stderr=subprocess.DEVNULL,
+                    )
+                    piper_proc.stdin.write(text.encode())
+                    piper_proc.stdin.close()
+                    aplay_proc.wait(timeout=30)
+                    piper_proc.wait(timeout=5)
                 elif engine in ("espeak-ng", "espeak"):
                     try:
                         subprocess.run(

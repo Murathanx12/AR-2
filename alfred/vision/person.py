@@ -115,8 +115,8 @@ class PersonDetector:
         if not hand or "landmarks" not in hand:
             return "unknown"
 
-        lm = hand["landmarks"]
-        if len(lm) < 21:
+        lm = hand.get("landmarks")
+        if not lm or len(lm) < 21:
             return "unknown"
 
         # Finger tip and pip indices (MediaPipe hand landmarks)

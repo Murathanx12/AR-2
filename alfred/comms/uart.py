@@ -142,5 +142,7 @@ class UARTBridge:
                 if now - last_ping >= self._ping_interval:
                     self._ser.write(b"hello from pi\n")
                     last_ping = now
-            except (OSError, Exception):
+            except (OSError, Exception) as e:
+                print(f"[UART] Connection lost: {e}")
                 break
+        print("[UART] Reader thread stopped")

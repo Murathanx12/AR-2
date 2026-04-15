@@ -92,33 +92,25 @@ class AlfredFSM:
                     resolution=self.config.vision.resolution,
                     fps=self.config.vision.fps,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Init] Camera unavailable: {e}")
             try:
                 from alfred.vision.aruco import ArucoDetector
                 self.aruco_detector = ArucoDetector(
                     dict_name=self.config.vision.aruco_dict,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Init] ArUco unavailable: {e}")
             try:
                 from alfred.vision.obstacle import ObstacleDetector
                 self.obstacle_detector = ObstacleDetector()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Init] Obstacle detector unavailable: {e}")
             try:
                 from alfred.vision.person import PersonDetector
                 self.person_detector = PersonDetector()
-            except Exception:
-                pass
-            try:
-                from alfred.vision.bev import BirdEyeView
-                self.bev = BirdEyeView(
-                    src_points=self.config.vision.bev_src_points or None,
-                    dst_points=self.config.vision.bev_dst_points or None,
-                )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Init] Person detector unavailable: {e}")
 
         # Navigation subsystems
         self.aruco_approach = None
@@ -128,18 +120,13 @@ class AlfredFSM:
         try:
             from alfred.navigation.aruco_approach import ArucoApproach
             self.aruco_approach = ArucoApproach()
-        except Exception:
-            pass
-        try:
-            from alfred.navigation.obstacle_avoider import ObstacleAvoider
-            self.obstacle_avoider = ObstacleAvoider()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Init] ArUco approach unavailable: {e}")
         try:
             from alfred.navigation.patrol import PatrolController
             self.patrol_controller = PatrolController()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Init] Patrol unavailable: {e}")
 
         # Voice subsystems
         self.voice_listener = None
@@ -357,12 +344,11 @@ class AlfredFSM:
     def _check_camera_obstacle(self) -> bool:
         """Check camera-based obstacle detection (R4).
 
-        Only triggers if a significant obstacle is detected in the center path.
-        Requires multiple consecutive frames to avoid false positives from
-        shadows or dark floor patches.
+        Returns True if obstacle detected. Returns False if no detector
+        (safe default — don't block when we can't detect).
         """
         if not self.obstacle_detector or self._last_frame is None:
-            return True  # no detector = assume clear
+            return False  # no detector = assume clear (don't false-block)
         return not self.obstacle_detector.is_path_clear(self._last_frame)
 
     def tick(self):
