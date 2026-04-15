@@ -1,15 +1,23 @@
 Project
-Sonny (Alfred V4) — Mecanum-wheeled robotic butler for HKU School of Innovation / Project Alfred coursework.
+Sonny (Alfred V4) — Mecanum-wheeled robotic butler for HKU School of Innovation / Project Alfred.
 Demo: April 24, 2026. Repo: https://github.com/Murathanx12/AR-2
-Wake phrase: "Hello Sonny" (EN) / "Merhaba Sonny" (TR)
+Wake phrase: "Hello Sonny" (say once, stays awake until "sleep")
+
+Known Issues (Apr 15, 2026)
+
+1. ESP32 motors not responding — UART connects but motors don't spin. Suspected hardware (wiring/short/battery). Run scripts/test_esp32.py to diagnose.
+2. Voice recognition ~50% accuracy — VOSK small model struggles with accented English. Considering Whisper tiny or phone app relay as alternatives.
+3. USB microphone weak — only picks up from ~30cm. Need conference mic or phone relay for demo.
+4. Obstacle detection disabled — camera-based detection had too many false positives. Only ultrasonic (when connected) triggers BLOCKED state.
 
 Architecture
 
 ESP32-S3: Motor PWM + 5x IR sensor reading at 20Hz + HC-SR04 ultrasonic at 10Hz + NeoPixel LEDs + buzzer. Firmware: esp32/src/main.cpp (PlatformIO).
 Raspberry Pi 5: Decision engine. Python. FSM + vision + voice + expression.
-14" Type-C monitor: Robot face (OLED eyes scaled up) + camera feed + status GUI via Pygame.
+14" Type-C monitor: Robot face (OLED eyes) + camera feed + status GUI via Pygame.
 UART: 115200 baud on /dev/ttyAMA2. Pi sends mv_vector:vx,vy,omega\n, ESP sends IR_STATUS:XX\n and DIST:XX.X\n.
 Mecanum IK: FL=vx+vy+omega, FR=vx-vy-omega, RL=vx-vy+omega, RR=vx+vy-omega. PWM 50-200 from 0-100%.
+Wiring: See docs/WIRING.md for complete pin map.
 
 Hardware Inventory
 
@@ -40,20 +48,25 @@ On-robot peripherals:
 
 Competition Requirements (Minilab 6 / Project Alfred)
 
-R1: Voice commands — wake phrase, FOLLOW TRACK, GO TO QR CODE. VOSK STT + fuzzy intent matching. ✅
-R2: Line-following delivery. IR sensors + weighted algorithmic control. ✅
-R3: ArUco marker approach. Visual-only with temporal smoothing + simultaneous steer/drive. ✅
-R4: Obstacle detection — ultrasonic HC-SR04 + camera contour detection, dual-sensor gate. ✅
-R5: Intention indicators — NeoPixel LEDs per state, TTS announcements, buzzer, OLED eyes on 14" screen. ✅
-EC1: Gesture recognition — MediaPipe hands, 6 gestures (fist/open/thumbs_up/peace/point/wave), gesture→action in patrol. ✅
-EC3: Claude API butler conversation — claude-haiku-4-5 with butler personality. ✅
-EC5: Butler personality — personality engine, 8 emotions, animated eyes, head tracking, multilingual TTS. ✅
+R1: Voice commands — wake phrase "Hello Sonny", FOLLOW TRACK, GO TO QR CODE. VOSK STT + exact keyword matching. ✅ (code done, accuracy needs improvement)
+R2: Line-following delivery. IR sensors + weighted algorithmic control. ✅ (code done, needs ESP32 hardware fix)
+R3: ArUco marker approach. Visual-only with EMA smoothing + simultaneous steer/drive. ✅ (code done, needs ESP32)
+R4: Obstacle detection — ultrasonic HC-SR04 only (camera detection disabled — too many false positives). ✅ (code done, needs ultrasonic wired)
+R5: Intention indicators — NeoPixel LEDs per state, TTS (espeak-ng), buzzer, OLED eyes, 14" screen GUI. ✅
+EC1: Gesture recognition — MediaPipe hands, 6 gestures, gesture→action in patrol. ✅
+EC3: Claude API butler conversation — claude-haiku-4-5 with personality. ✅ (needs ANTHROPIC_API_KEY)
+EC5: Butler personality — 8 emotions, animated eyes, head tracking. ✅
 
-Language Support
+Voice System Design
 
-English (default): VOSK en-US model, espeak-ng mb-us1 voice
-Turkish (optional): VOSK tr model (vosk-model-small-tr-0.3), espeak-ng Turkish voice
-Switch at runtime: say "switch language to Turkish" / "speak Turkish" / "dil degistir"
+- VOSK offline STT with grammar-constrained recognition (prevents garbage from noise)
+- Wake word: "Hello Sonny" (also accepts "hello sunny", "hello sony", "hey sonny", bare "hello")
+- Say wake word ONCE — robot stays awake. All subsequent speech = commands.
+- "stop" always works from any state, even before wake word
+- "sleep" requires wake word again
+- Mic mutes during TTS to prevent echo loop (speaker → mic → false command)
+- Intent classifier: exact keyword match only. No fuzzy, no confirmation dialogs.
+- Known limitation: VOSK small model has ~50% accuracy for accented English
 
 UART Protocol (Pi → ESP32)
 
@@ -75,13 +88,13 @@ DIST:XX.X (ultrasonic cm, 10Hz)
 V4 Modules
 
 alfred/config.py — All params as frozen dataclasses. AlfredConfig singleton.
-alfred/comms/ — protocol.py (pure cmd_* formatters), uart.py (UARTBridge thread-safe R/W, parses IR+DIST).
-alfred/navigation/ — line_follower.py (weighted algo), aruco_approach.py (visual-only + calibrated, EMA smoothing), obstacle_avoider, patrol.
-alfred/vision/ — camera, aruco (DICT_4X4_50, detect+draw+pose), obstacle (contour-based), person (MediaPipe face+hand+gesture), BEV, course_mapper.
-alfred/voice/ — listener.py (VOSK STT, EN+TR, runtime switching), intent.py (fuzzy keyword classifier), speaker.py (multilingual TTS), conversation.py (Claude API EC3).
-alfred/expression/ — eyes.py (8 emotions, gaze tracking, auto-blink), leds.py (NeoPixel animations), head.py (PCA9685 servo), personality.py (state→expression, 10Hz update).
-alfred/fsm/ — states.py (17-state IntEnum), controller.py (30Hz dispatch, R4 obstacle + R5 indicators + EC1 gestures).
-alfred/gui/ — debug_gui.py (1024x600 Pygame dashboard: OLED eyes, camera with overlays, IR sensors, vector field, status log, gesture display).
+alfred/comms/ — protocol.py (pure cmd_* formatters), uart.py (UARTBridge, prints connection status).
+alfred/navigation/ — line_follower.py (weighted algo), aruco_approach.py (visual-only + EMA smoothing), obstacle_avoider, patrol.
+alfred/vision/ — camera, aruco (DICT_4X4_50), obstacle (contour), person (MediaPipe face+hand+gesture), BEV, course_mapper.
+alfred/voice/ — listener.py (VOSK grammar-constrained, wake-once, mic mute during TTS), intent.py (exact keyword match), speaker.py (espeak-ng TTS), conversation.py (Claude API EC3).
+alfred/expression/ — eyes.py (8 emotions, gaze, auto-blink), leds.py (NeoPixel), head.py (PCA9685 servo), personality.py (state→expression, 10Hz).
+alfred/fsm/ — states.py (17-state IntEnum), controller.py (30Hz dispatch).
+alfred/gui/ — debug_gui.py (1280x720 Pygame: eyes, camera+overlays, IR, vector, voice I/O, gestures, event log).
 alfred/utils/ — logging (colored), timing (RateTimer, Stopwatch).
 
 Key Commands
@@ -90,13 +103,18 @@ Key Commands
 cd esp32 && pio run --target upload
 
 # Run Sonny V4 (on Raspberry Pi)
-python Minilab5/alfred.py
-python Minilab5/alfred.py --headless --no-voice --no-camera
+python3 Minilab5/alfred.py              # full GUI
+python3 Minilab5/alfred.py --headless   # terminal dashboard
+python3 Minilab5/alfred.py --no-voice   # skip voice
+python3 Minilab5/alfred.py --no-camera  # skip camera
+
+# Diagnose ESP32 connection
+python3 scripts/test_esp32.py
 
 # Run tests
 python -m pytest tests/
 
 # Test individual modules
-python scripts/test_aruco.py
-python scripts/calibrate_bev.py
+python3 scripts/test_aruco.py
+python3 scripts/calibrate_bev.py
 ```
