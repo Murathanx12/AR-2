@@ -41,15 +41,22 @@ class UARTBridge:
     def open(self):
         """Open serial port and start reader thread."""
         if not _HAS_SERIAL:
-            logger.warning("UART unavailable (pyserial not installed). Running in dry-run mode.")
+            print("[UART] WARNING: pyserial not installed. Motors will NOT work.")
             return
         try:
             self._ser = serial.Serial(self._port, self._baud_rate, timeout=1)
             self._running = True
             self._thread = threading.Thread(target=self._reader_loop, daemon=True)
             self._thread.start()
+            print(f"[UART] Connected to ESP32 on {self._port} @ {self._baud_rate}")
         except (OSError, serial.SerialException) as e:
-            logger.warning(f"UART open failed: {e}. Running in dry-run mode.")
+            print(f"[UART] FAILED to open {self._port}: {e}")
+            print(f"[UART] Motors will NOT work. Check:")
+            print(f"[UART]   1. ESP32 is powered on (12V battery)")
+            print(f"[UART]   2. UART wires: Pi TX(pin8) -> ESP32 RX(GPIO16)")
+            print(f"[UART]   3. UART wires: Pi RX(pin10) -> ESP32 TX(GPIO17)")
+            print(f"[UART]   4. GND connected between Pi and ESP32")
+            print(f"[UART]   5. Run: ls -la /dev/ttyAMA2")
 
     def close(self):
         """Stop reader thread and close serial port."""
@@ -64,6 +71,9 @@ class UARTBridge:
         """Send a pre-formatted command string over serial."""
         if self._ser and self._ser.is_open:
             self._ser.write(command.encode())
+        elif command.strip() not in ("stop:0",):
+            # Log dropped commands (except frequent stop) so user knows UART is down
+            logger.debug(f"[UART] Dropped (no connection): {command.strip()}")
 
     def get_ir_status(self) -> int:
         """Return raw 5-bit IR status word (thread-safe)."""
