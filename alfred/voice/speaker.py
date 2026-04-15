@@ -18,8 +18,8 @@ except (ImportError, Exception):
 # Detect available TTS engine
 _TTS_ENGINE = None
 
+
 def _find_piper_model():
-    """Search for a piper .onnx voice model in common locations."""
     import glob as _glob
     search_paths = [
         os.path.join(os.getcwd(), "piper-voices", "*.onnx"),
@@ -38,7 +38,6 @@ def _detect_tts():
     if _TTS_ENGINE is not None:
         return _TTS_ENGINE
 
-    # Try piper first — but only if a model file actually exists
     try:
         subprocess.run(["piper", "--help"], capture_output=True, timeout=3)
         model = _find_piper_model()
@@ -46,12 +45,9 @@ def _detect_tts():
             _TTS_ENGINE = "piper"
             logger.info(f"TTS engine: piper (model: {model})")
             return _TTS_ENGINE
-        else:
-            logger.info("piper installed but no .onnx model found, skipping")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    # Try espeak-ng
     try:
         subprocess.run(["espeak-ng", "--version"], capture_output=True, timeout=3)
         _TTS_ENGINE = "espeak-ng"
@@ -60,7 +56,6 @@ def _detect_tts():
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    # Try espeak
     try:
         subprocess.run(["espeak", "--version"], capture_output=True, timeout=3)
         _TTS_ENGINE = "espeak"
@@ -70,148 +65,82 @@ def _detect_tts():
         pass
 
     _TTS_ENGINE = "none"
-    logger.warning("No TTS engine found (tried piper, espeak-ng, espeak)")
+    logger.warning("No TTS engine found")
     return _TTS_ENGINE
 
 
 class Speaker:
-    """Text-to-speech and sound playback.
+    """Text-to-speech with phrase lookup.
 
     Tries piper-tts first, falls back to espeak-ng/espeak.
-    Supports English and Turkish with runtime language switching.
-    Sound playback uses pygame.mixer.
     """
 
     PHRASES = {
-        "en": {
-            "greet": "Good day, I am Sonny. How may I help you?",
-            "acknowledge": "Right away.",
-            "confused": "I'm not sure I understand. Could you repeat that?",
-            "goodbye": "Until next time. Take care!",
-            "follow": "Following the track now.",
-            "stop": "Stopping immediately.",
-            "dance": "Time to dance!",
-            "photo": "Say cheese!",
-            "patrol": "Starting patrol mode.",
-            "sleep": "Going to sleep. Say Hello Sonny to wake me.",
-            "lost": "I seem to have lost the line. Let me find it.",
-            "arrived": "I have arrived at the destination.",
-            "blocked": "Something is in the way. Please clear the path.",
-            "lang_switch": "Switching to Turkish.",
-            "searching": "Searching for the marker.",
-            "approaching": "Marker found. Approaching.",
-            "path_clear": "Path clear. Resuming.",
-            "person_greet": "Hello! How may I help you?",
-            "delivery_ready": "I have arrived at the marker. Your delivery is ready.",
-        },
-        "tr": {
-            "greet": "Iyi gunler, ben Sonny. Size nasil yardimci olabilirim?",
-            "acknowledge": "Hemen yapiyorum.",
-            "confused": "Anlayamadim. Tekrar eder misiniz?",
-            "goodbye": "Gorusmek uzere. Kendinize iyi bakin!",
-            "follow": "Cizgiyi takip ediyorum.",
-            "stop": "Duruyorum.",
-            "dance": "Dans zamani!",
-            "photo": "Gulumseyin!",
-            "patrol": "Devriye moduna geciyorum.",
-            "sleep": "Uyku moduna geciyorum. Merhaba Sonny diyerek uyandirin.",
-            "lost": "Cizgiyi kaybettim. Bulmaya calisiyorum.",
-            "arrived": "Hedefe vardim.",
-            "blocked": "Yolda engel var. Lutfen yolu temizleyin.",
-            "lang_switch": "Ingilizceye geciyorum.",
-            "searching": "Isaretci araniyor.",
-            "approaching": "Isaretci bulundu. Yaklasiyorum.",
-            "path_clear": "Yol temiz. Devam ediyorum.",
-            "person_greet": "Merhaba! Size nasil yardimci olabilirim?",
-            "delivery_ready": "Isaretciye vardim. Teslimatiniz hazir.",
-        },
+        "greet": "Good day, I am Sonny. How may I help you?",
+        "acknowledge": "Right away.",
+        "confused": "I'm not sure I understand. Could you repeat that?",
+        "goodbye": "Until next time. Take care!",
+        "follow": "Following the track now.",
+        "stop": "Stopping.",
+        "dance": "Time to dance!",
+        "photo": "Say cheese!",
+        "patrol": "Starting patrol mode.",
+        "sleep": "Going to sleep. Say Hello Sonny to wake me.",
+        "lost": "I seem to have lost the line.",
+        "arrived": "I have arrived at the destination.",
+        "blocked": "Obstacle detected. Please clear the path.",
+        "searching": "Searching for the marker.",
+        "approaching": "Marker found. Approaching.",
+        "path_clear": "Path clear. Resuming.",
+        "person_greet": "Hello! How may I help you?",
+        "delivery_ready": "I have arrived at the marker.",
+        "awake": "I'm listening. What would you like me to do?",
     }
 
-    # Flat fallback for backward compatibility
-    PHRASES_FLAT = PHRASES["en"]
-
-    def __init__(self, piper_voice=None, assets_dir=None, language="en"):
-        """
-        Args:
-            piper_voice: Path to piper .onnx model, or None to auto-detect.
-            assets_dir: Directory containing sound files. Defaults to assets/sounds/.
-            language: Initial language ("en" or "tr").
-        """
+    def __init__(self, piper_voice=None, assets_dir=None):
         self._piper_voice = piper_voice or _find_piper_model()
         self._assets_dir = assets_dir or os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "assets", "sounds"
         )
         self._speaking = False
         self._lock = threading.Lock()
-        self._language = language
 
     @property
     def language(self):
-        return self._language
-
-    @language.setter
-    def language(self, lang):
-        if lang in self.PHRASES:
-            self._language = lang
-            logger.info(f"Speaker language set to: {lang}")
+        return "en"
 
     def say(self, text):
-        """Speak text using available TTS engine. Non-blocking.
-
-        Args:
-            text: Text string to speak, or a key from PHRASES dict.
-        """
-        # Resolve phrase keys: try current language first, fall back to English
-        lang_phrases = self.PHRASES.get(self._language, self.PHRASES["en"])
-        actual_text = lang_phrases.get(text, self.PHRASES["en"].get(text, text))
-
+        """Speak text (non-blocking). Accepts phrase keys or raw text."""
+        actual_text = self.PHRASES.get(text, text)
         thread = threading.Thread(target=self._speak_sync, args=(actual_text,), daemon=True)
         thread.start()
 
     def say_sync(self, text):
-        """Speak text synchronously (blocks until done)."""
-        lang_phrases = self.PHRASES.get(self._language, self.PHRASES["en"])
-        actual_text = lang_phrases.get(text, self.PHRASES["en"].get(text, text))
+        """Speak text (blocking)."""
+        actual_text = self.PHRASES.get(text, text)
         self._speak_sync(actual_text)
 
     def _speak_sync(self, text):
-        """Internal: run TTS synchronously."""
         with self._lock:
             self._speaking = True
             try:
                 engine = _detect_tts()
-
                 if engine == "piper":
                     subprocess.run(
                         f'echo "{text}" | piper --model {self._piper_voice} --output-raw | aplay -r 22050 -f S16_LE -c 1',
                         shell=True, timeout=30
                     )
                 elif engine in ("espeak-ng", "espeak"):
-                    # Select voice based on language
-                    if self._language == "tr":
-                        # Turkish voice
-                        try:
-                            subprocess.run(
-                                [engine, "-v", "tr", "-s", "160", "-p", "40", text],
-                                timeout=30, capture_output=True, check=True
-                            )
-                        except (subprocess.CalledProcessError, FileNotFoundError):
-                            subprocess.run(
-                                [engine, "-s", "150", text],
-                                timeout=30, capture_output=True
-                            )
-                    else:
-                        # English — try mbrola voice first (much more natural)
-                        try:
-                            subprocess.run(
-                                [engine, "-v", "mb-us1", "-s", "160", "-p", "40", text],
-                                timeout=30, capture_output=True, check=True
-                            )
-                        except (subprocess.CalledProcessError, FileNotFoundError):
-                            subprocess.run(
-                                [engine, "-s", "150", text],
-                                timeout=30, capture_output=True
-                            )
+                    try:
+                        subprocess.run(
+                            [engine, "-v", "mb-us1", "-s", "160", "-p", "40", text],
+                            timeout=30, capture_output=True, check=True
+                        )
+                    except (subprocess.CalledProcessError, FileNotFoundError):
+                        subprocess.run(
+                            [engine, "-s", "150", text],
+                            timeout=30, capture_output=True
+                        )
                 else:
                     logger.info(f"[TTS] {text}")
             except subprocess.TimeoutExpired:
@@ -222,54 +151,16 @@ class Speaker:
                 self._speaking = False
 
     def play_sound(self, name):
-        """Play a sound file from assets directory.
-
-        Args:
-            name: Sound file name (without extension — tries .wav, .mp3, .ogg).
-        """
         if not _HAS_PYGAME:
-            logger.warning(f"Cannot play sound '{name}': pygame not available")
             return
-
         for ext in ('.wav', '.mp3', '.ogg'):
             path = os.path.join(self._assets_dir, name + ext)
             if os.path.exists(path):
                 try:
-                    sound = pygame.mixer.Sound(path)
-                    sound.play()
-                    logger.debug(f"Playing sound: {path}")
+                    pygame.mixer.Sound(path).play()
                     return
-                except Exception as e:
-                    logger.error(f"Sound playback error: {e}")
+                except Exception:
                     return
-
-        logger.warning(f"Sound file not found: {name}")
-
-    def play_music(self, path):
-        """Play background music file (streaming).
-
-        Args:
-            path: Path to music file.
-        """
-        if not _HAS_PYGAME:
-            logger.warning("Cannot play music: pygame not available")
-            return
-
-        if not os.path.exists(path):
-            logger.warning(f"Music file not found: {path}")
-            return
-
-        try:
-            pygame.mixer.music.load(path)
-            pygame.mixer.music.play()
-            logger.debug(f"Playing music: {path}")
-        except Exception as e:
-            logger.error(f"Music playback error: {e}")
-
-    def stop_music(self):
-        """Stop currently playing music."""
-        if _HAS_PYGAME:
-            pygame.mixer.music.stop()
 
     @property
     def is_speaking(self):

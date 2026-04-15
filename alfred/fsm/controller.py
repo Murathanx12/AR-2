@@ -388,73 +388,77 @@ class AlfredFSM:
     # -- Voice callback -----------------------------------------------------
 
     def _on_voice_command(self, text):
-        """Handle a recognised voice command."""
+        """Handle a recognised voice command.
+
+        Called for every sentence after wake word. "stop" works from any state.
+        """
         if not self.intent_classifier:
             return
 
         intent, confidence = self.intent_classifier.classify(text)
-        print(f"[Voice] '{text}' -> {intent} ({confidence:.1f})")
+        print(f"[Voice] '{text}' -> {intent} ({confidence:.0%})")
 
         # Feed to GUI
         if self.gui:
             self.gui.set_voice_input(text, intent, confidence)
 
-        # Handle language switching
-        if intent == "switch_language":
-            target_lang = self.intent_classifier.extract_language(text)
-            if target_lang and self.voice_listener:
-                self.voice_listener.switch_language(target_lang)
-                if self.speaker:
-                    self.speaker.say("lang_switch")
-                    self.speaker.language = target_lang
-                print(f"[Voice] Language switched to: {target_lang}")
+        # STOP always works immediately from any state
+        if intent == "stop":
+            self.uart.send(cmd_stop())
+            self.line_follower.debug_vx = 0
+            self.line_follower.debug_vy = 0
+            self.line_follower.debug_omega = 0
+            if self.speaker:
+                self.speaker.say("stop")
+            if self.gui:
+                self.gui.set_voice_output("Stopping.")
+            self.transition(State.IDLE)
             return
 
-        # Confirm what we heard back to the user
-        INTENT_CONFIRMATIONS = {
-            "follow_track": "Got it. Following the track.",
-            "go_to_aruco":  "Got it. Searching for the marker.",
-            "dance":        "Got it. Time to dance!",
-            "take_photo":   "Got it. Taking a photo.",
-            "come_here":    "Got it. Coming to you.",
-            "stop":         "Got it. Stopping now.",
-            "sleep":        "Got it. Going to sleep.",
-            "patrol":       "Got it. Starting patrol.",
-            "confirm":      "Confirmed.",
-            "cancel":       "Cancelled.",
-            "chat":         None,  # conversation handles its own response
-        }
+        # SLEEP puts the voice listener back to sleep too
+        if intent == "sleep":
+            if self.speaker:
+                self.speaker.say("sleep")
+            if self.voice_listener:
+                self.voice_listener.put_to_sleep()
+            self.transition(State.SLEEPING)
+            return
 
-        # Speak confirmation before acting
-        confirmation = INTENT_CONFIRMATIONS.get(intent)
-        if confirmation and self.speaker:
-            self.speaker.say(confirmation)
-            if self.gui:
-                self.gui.set_voice_output(confirmation)
-        elif intent == "unknown" and self.speaker:
-            unknown_msg = f"I heard {text}, but I don't understand that command."
-            self.speaker.say(unknown_msg)
-            if self.gui:
-                self.gui.set_voice_output(unknown_msg)
-
-        # EC3: Handle chat/conversation intent
+        # EC3: Chat goes to conversation engine
         if intent == "chat" and self.conversation:
             self.conversation.handle(text)
             return
 
+        # Map intent to state
         intent_to_state = {
             "follow_track": State.FOLLOWING,
             "go_to_aruco":  State.ARUCO_SEARCH,
             "dance":        State.DANCING,
             "take_photo":   State.PHOTO,
             "come_here":    State.PERSON_APPROACH,
-            "stop":         State.STOPPING,
-            "sleep":        State.SLEEPING,
             "patrol":       State.PATROL,
+            "search":       State.ARUCO_SEARCH,
         }
 
-        if intent in intent_to_state:
-            target = intent_to_state[intent]
+        target = intent_to_state.get(intent)
+        if target:
+            # Confirm what we heard
+            confirmations = {
+                "follow_track": "Following the track.",
+                "go_to_aruco":  "Searching for the marker.",
+                "dance":        "Time to dance!",
+                "take_photo":   "Say cheese!",
+                "come_here":    "Coming to you.",
+                "patrol":       "Starting patrol.",
+                "search":       "Searching for the marker.",
+            }
+            msg = confirmations.get(intent, "Got it.")
+            if self.speaker:
+                self.speaker.say(msg)
+            if self.gui:
+                self.gui.set_voice_output(msg)
+
+            # Prepare state
             if target == State.FOLLOWING:
                 self.line_follower.reset()
             elif target == State.DANCING:
@@ -464,27 +468,34 @@ class AlfredFSM:
             elif target == State.ARUCO_SEARCH and self.aruco_approach:
                 self.aruco_approach.reset()
             self.transition(target)
+
         elif intent == "confirm":
             pass
         elif intent == "cancel":
             self.transition(State.IDLE)
+        elif intent == "unknown":
+            if self.speaker:
+                self.speaker.say("confused")
+            if self.gui:
+                self.gui.set_voice_output(f"Didn't understand: {text}")
 
     # -- State tick handlers ------------------------------------------------
 
     def _tick_idle(self):
-        """Wait for voice command or GUI input. Check for wake word."""
+        """Wait for wake word. Once awake, commands come via callback directly."""
         if self.voice_listener and self.voice_listener.is_wake_word_detected():
-            self._listen_timeout = time.monotonic() + self.config.voice.listen_timeout
+            if self.speaker:
+                self.speaker.say("awake")
+            if self.personality:
+                self.personality.express_greeting()
             self.transition(State.LISTENING)
 
     def _tick_listening(self):
-        """Actively listening for a command after wake word.
-        Times out back to IDLE after listen_timeout seconds."""
-        if self._listen_timeout and time.monotonic() > self._listen_timeout:
-            self._listen_timeout = None
-            if self.speaker:
-                self.speaker.say("I didn't catch that.")
-            self.transition(State.IDLE)
+        """Awake and waiting for commands. Stay here until a command arrives.
+        Commands are handled by _on_voice_command callback — no timeout."""
+        # Nothing to do here — commands arrive via the callback
+        # and transition us to the appropriate state.
+        pass
 
     def _tick_following(self):
         """Run line follower and mirror sub-FSM transitions."""
@@ -811,13 +822,13 @@ class AlfredFSM:
         self.transition(State.IDLE)
 
     def _tick_sleeping(self):
-        """Low-power sleep state. Wake on wake word."""
+        """Sleep state. Requires wake word ("Hello Sonny") to wake up again."""
         if self.voice_listener and self.voice_listener.is_wake_word_detected():
+            if self.speaker:
+                self.speaker.say("awake")
             if self.personality:
                 self.personality.express_greeting()
-            if self.speaker:
-                self.speaker.say("greet")
-            self.transition(State.IDLE)
+            self.transition(State.LISTENING)
 
     # -- Main loop ----------------------------------------------------------
 
