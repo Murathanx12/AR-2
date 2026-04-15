@@ -230,7 +230,7 @@ class AlfredFSM:
         self._last_frame = None
         self._last_faces = []
         self._last_obstacles = []
-        self._pending_intent = None  # for yes/no confirmation of partial matches
+        self._listen_timeout = None
 
         # Dispatch table
         self._tick_dispatch = {
@@ -391,23 +391,13 @@ class AlfredFSM:
     # -- Voice callback -----------------------------------------------------
 
     def _on_voice_command(self, text):
-        """Handle a recognised voice command.
-
-        Called for every sentence after wake word. Handles:
-        - __confirm_wake__: listener heard just "hello", asks confirmation
-        - stop: always works from any state
-        - Partial matches (0.5 confidence): asks yes/no before executing
-        - Exact matches (1.0 confidence): executes immediately
-        """
+        """Handle a recognised voice command. Simple: match or don't."""
         if not self.intent_classifier:
             return
 
-        # Special signal from listener: bare "hello" heard, ask if talking to us
+        # Special signal from listener: bare "hello" heard
         if text == "__confirm_wake__":
-            if self.speaker:
-                self.speaker.say("Are you talking to me?")
-            if self.gui:
-                self.gui.set_voice_output("Are you talking to me?")
+            # Just wake up directly — don't ask confirmation
             return
 
         intent, confidence = self.intent_classifier.classify(text)
@@ -415,21 +405,6 @@ class AlfredFSM:
 
         if self.gui:
             self.gui.set_voice_input(text, intent, confidence)
-
-        # If we were waiting for a yes/no answer to a pending intent
-        if self._pending_intent:
-            pending = self._pending_intent
-            self._pending_intent = None
-            if intent == "confirm":
-                # They said yes — execute the pending command
-                print(f"[Voice] Confirmed: {pending}")
-                self._execute_intent(pending)
-            else:
-                if self.speaker:
-                    self.speaker.say("Okay, cancelled.")
-                if self.gui:
-                    self.gui.set_voice_output("Cancelled.")
-            return
 
         # STOP always works immediately from any state
         if intent == "stop":
@@ -453,41 +428,12 @@ class AlfredFSM:
             self.transition(State.SLEEPING)
             return
 
-        # Exact match — execute immediately
-        if confidence >= 1.0:
-            self._execute_intent(intent)
-            return
-
-        # Partial match — ask for confirmation
-        if confidence >= 0.5:
-            question = self.intent_classifier.get_confirmation_question(intent)
-            if question:
-                self._pending_intent = intent
-                if self.speaker:
-                    self.speaker.say(question)
-                if self.gui:
-                    self.gui.set_voice_output(question)
-                print(f"[Voice] Asking confirmation for: {intent}")
-                return
-            else:
-                # No question defined — just execute it
-                self._execute_intent(intent)
-                return
-
-        # Unknown
-        if self.speaker:
-            self.speaker.say("confused")
-        if self.gui:
-            self.gui.set_voice_output(f"Didn't understand: {text}")
-
-    def _execute_intent(self, intent):
-        """Execute a confirmed intent — transition to the right state."""
-
         # EC3: Chat
         if intent == "chat" and self.conversation:
-            self.conversation.handle("")
+            self.conversation.handle(text)
             return
 
+        # Map to state
         intent_to_state = {
             "follow_track": State.FOLLOWING,
             "go_to_aruco":  State.ARUCO_SEARCH,
@@ -499,34 +445,40 @@ class AlfredFSM:
         }
 
         target = intent_to_state.get(intent)
-        if not target:
-            return
+        if target:
+            confirmations = {
+                "follow_track": "Following the track.",
+                "go_to_aruco":  "Searching for the marker.",
+                "dance":        "Time to dance!",
+                "take_photo":   "Say cheese!",
+                "come_here":    "Coming to you.",
+                "patrol":       "Starting patrol.",
+                "search":       "Searching for the marker.",
+            }
+            msg = confirmations.get(intent, "Got it.")
+            if self.speaker:
+                self.speaker.say(msg)
+            if self.gui:
+                self.gui.set_voice_output(msg)
 
-        confirmations = {
-            "follow_track": "Following the track.",
-            "go_to_aruco":  "Searching for the marker.",
-            "dance":        "Time to dance!",
-            "take_photo":   "Say cheese!",
-            "come_here":    "Coming to you.",
-            "patrol":       "Starting patrol.",
-            "search":       "Searching for the marker.",
-        }
-        msg = confirmations.get(intent, "Got it.")
-        if self.speaker:
-            self.speaker.say(msg)
-        if self.gui:
-            self.gui.set_voice_output(msg)
+            if target == State.FOLLOWING:
+                self.line_follower.reset()
+            elif target == State.DANCING:
+                self._dance_start = time.monotonic()
+            elif target == State.PHOTO:
+                self._photo_taken = False
+            elif target == State.ARUCO_SEARCH and self.aruco_approach:
+                self.aruco_approach.reset()
+            self.transition(target)
 
-        # Prepare state
-        if target == State.FOLLOWING:
-            self.line_follower.reset()
-        elif target == State.DANCING:
-            self._dance_start = time.monotonic()
-        elif target == State.PHOTO:
-            self._photo_taken = False
-        elif target == State.ARUCO_SEARCH and self.aruco_approach:
-            self.aruco_approach.reset()
-        self.transition(target)
+        elif intent in ("confirm", "cancel"):
+            pass  # ignore stray yes/no
+
+        elif intent == "unknown":
+            if self.speaker:
+                self.speaker.say("confused")
+            if self.gui:
+                self.gui.set_voice_output(f"Didn't understand: {text}")
 
     # -- State tick handlers ------------------------------------------------
 
