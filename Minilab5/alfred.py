@@ -252,6 +252,8 @@ def main():
     parser.add_argument("--headless", action="store_true", help="Run without GUI")
     parser.add_argument("--no-voice", action="store_true", help="Skip voice subsystem")
     parser.add_argument("--no-camera", action="store_true", help="Skip camera subsystem")
+    parser.add_argument("--no-web", action="store_true", help="Skip phone web controller")
+    parser.add_argument("--web-port", type=int, default=8080, help="Phone web controller port")
     parser.add_argument("--test-vision", action="store_true", help="Run vision test and exit")
     parser.add_argument("--test-voice", action="store_true", help="Run voice test and exit")
     parser.add_argument("--speed", type=int, default=CONFIG.speed.default_speed,
@@ -277,6 +279,16 @@ def main():
 
     if args.speed != CONFIG.speed.default_speed:
         fsm.line_follower.current_speed = args.speed
+
+    # Start phone web controller (always, unless --no-web)
+    web = None
+    if not args.no_web:
+        try:
+            from alfred.web.app import WebController
+            web = WebController(fsm=fsm, port=args.web_port)
+            web.start()
+        except Exception as e:
+            print(f"[Web] Failed to start: {e} (install flask: pip install flask)")
 
     # GUI mode
     gui = None
