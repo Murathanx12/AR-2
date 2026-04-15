@@ -1,11 +1,7 @@
 """Voice listener — wake-word detection and speech-to-text using VOSK.
 
-Design:
-1. "Hello Sonny" / "hello sunny" / "hello sony" / etc all wake up
-2. Just "hello" alone triggers "Are you talking to me?" confirmation
-3. Once awake, stays awake — every sentence is a command
-4. "stop" always works, even before wake
-5. "sleep" puts back to sleep
+Uses grammar-constrained VOSK for accurate command recognition (no garbage).
+Mutes recognition while robot is speaking (prevents mic hearing speaker).
 """
 
 import threading
@@ -29,20 +25,39 @@ except ImportError:
     _HAS_VOSK = False
 
 
-# All variations VOSK might hear when you say "Hello Sonny"
-WAKE_EXACT = {
+WAKE_VARIANTS = {
     "hello sonny", "hello sunny", "hello sony", "hello son",
     "hallo sonny", "hallo sunny", "halo sonny", "halo sunny",
     "hey sonny", "hey sunny", "hey sony",
     "hi sonny", "hi sunny", "hi sony",
 }
 
-# Partial wake — just "hello" or "hey" alone, needs confirmation
 WAKE_MAYBE = {"hello", "hallo", "halo", "hey", "hi"}
+
+# Grammar: all words VOSK is allowed to recognize.
+# This prevents it from hearing random sentences from background noise.
+GRAMMAR = json.dumps([
+    "hello", "hey", "hi", "halo", "hallo",
+    "sonny", "sunny", "sony", "son",
+    "follow", "the", "track", "line", "path",
+    "go", "to", "qr", "code", "marker", "find",
+    "stop", "halt", "freeze",
+    "dance", "groove",
+    "photo", "picture", "selfie", "take", "a",
+    "come", "here", "me", "over",
+    "patrol", "wander", "roam", "explore",
+    "sleep", "rest", "standby",
+    "search", "look", "around", "scan",
+    "chat", "talk", "tell",
+    "yes", "yeah", "yep", "sure", "okay", "ok",
+    "no", "nope", "cancel", "never", "mind",
+    "start", "begin", "please",
+    "[unk]",
+])
 
 
 class VoiceListener:
-    """VOSK-based voice listener with forgiving wake word detection."""
+    """Grammar-constrained VOSK listener with forgiving wake word."""
 
     SAMPLE_RATE = 16000
     CHUNK_SIZE = 4000
@@ -52,20 +67,25 @@ class VoiceListener:
         self._running = False
         self._callback = None
         self._thread = None
+        self._speaker = None  # set via set_speaker() to mute during TTS
 
         self._lock = threading.Lock()
         self._awake = False
         self._wake_detected = False
-        self._waiting_confirm = False   # waiting for yes/no after "hello"
+        self._waiting_confirm = False
         self._last_text = ""
+        self._muted_until = 0  # timestamp — ignore audio until this time
 
     @property
     def language(self):
         return "en"
 
+    def set_speaker(self, speaker):
+        """Link speaker so we can mute mic while robot talks."""
+        self._speaker = speaker
+
     def start(self):
         if not _HAS_PYAUDIO or not _HAS_VOSK:
-            logger.warning("Cannot start voice listener: missing pyaudio/vosk")
             return
         self._running = True
         self._thread = threading.Thread(target=self._listen_loop, daemon=True)
@@ -128,7 +148,7 @@ class VoiceListener:
     def _listen_loop(self):
         model_path = self._find_model()
         if not model_path:
-            logger.error("VOSK model not found! Download vosk-model-small-en-us-0.15")
+            logger.error("VOSK model not found!")
             return
 
         try:
@@ -149,8 +169,7 @@ class VoiceListener:
             p.terminate()
             return
 
-        # Open recognition — no grammar constraint
-        rec = KaldiRecognizer(model, self.SAMPLE_RATE)
+        rec = KaldiRecognizer(model, self.SAMPLE_RATE, GRAMMAR)
         logger.info("Voice ready. Say 'Hello Sonny' to wake up.")
 
         while self._running:
@@ -159,10 +178,22 @@ class VoiceListener:
                 if not data:
                     continue
 
+                # Skip if robot is currently speaking (prevent echo)
+                if self._speaker and self._speaker.is_speaking:
+                    self._muted_until = time.monotonic() + 1.0
+                    continue
+                if time.monotonic() < self._muted_until:
+                    continue
+
                 if rec.AcceptWaveform(data):
                     result = json.loads(rec.Result())
                     text = result.get("text", "").lower().strip()
-                    if not text:
+                    if not text or text == "[unk]":
+                        continue
+
+                    # Filter out junk — must have at least one real word
+                    real_words = [w for w in text.split() if w != "[unk]" and len(w) > 1]
+                    if not real_words:
                         continue
 
                     with self._lock:
@@ -180,7 +211,7 @@ class VoiceListener:
         p.terminate()
 
     def _process(self, text):
-        words = set(text.split())
+        words = set(text.split()) - {"[unk]", "the", "a", "to", "please"}
 
         # "stop" always works
         if words & {"stop", "halt", "freeze"}:
@@ -188,18 +219,14 @@ class VoiceListener:
                 self._callback("stop")
             return
 
-        # Waiting for yes/no confirmation after bare "hello"
+        # Waiting for yes/no
         if self._waiting_confirm:
             with self._lock:
                 self._waiting_confirm = False
-            if words & {"yes", "yeah", "yep", "sure", "okay", "ok", "yea"}:
+            if words & {"yes", "yeah", "yep", "sure", "okay", "ok"}:
                 self._do_wake(text)
-            elif words & {"no", "nope", "nah", "cancel"}:
-                logger.info("Not talking to Sonny, going back to sleep")
             else:
-                # Ambiguous — treat as yes if awake context makes sense
-                # but don't wake if they said something random
-                logger.info(f"Unclear confirmation: '{text}', ignoring")
+                logger.info("Confirmation denied")
             return
 
         # Already awake — everything is a command
@@ -208,23 +235,17 @@ class VoiceListener:
                 self._callback(text)
             return
 
-        # Not awake — check for wake word
-        # Check exact matches first (hello sonny, hello sunny, etc)
-        for wake in WAKE_EXACT:
+        # Not awake — check wake word
+        for wake in WAKE_VARIANTS:
             if wake in text:
-                # Extract command after wake phrase if any
                 after = text.split(wake, 1)[-1].strip()
                 self._do_wake(after)
                 return
 
-        # Check partial wake — just "hello" alone
-        stripped_words = words - {"[unk]", "the", "a", "to", "is", "it"}
-        if stripped_words and stripped_words.issubset(WAKE_MAYBE):
-            # They just said "hello" or "hey" — ask for confirmation
-            with self._lock:
-                self._waiting_confirm = True
-            if self._callback:
-                self._callback("__confirm_wake__")
+        # Bare "hello" etc
+        if words and words.issubset(WAKE_MAYBE | {"sonny", "sunny", "sony", "son"}):
+            # Close enough — just wake up
+            self._do_wake("")
             return
 
     def _do_wake(self, command_after=""):

@@ -165,6 +165,9 @@ class AlfredFSM:
                 self.speaker = Speaker()
             except Exception:
                 pass
+            # Link speaker to listener so mic mutes while robot talks
+            if self.voice_listener and self.speaker:
+                self.voice_listener.set_speaker(self.speaker)
             try:
                 from alfred.voice.conversation import ConversationEngine
                 self.conversation = ConversationEngine(speaker=self.speaker)
