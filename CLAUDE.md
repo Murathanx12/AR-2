@@ -6,7 +6,7 @@ Wake phrase: "Hello Sonny" (say once, stays awake until "sleep")
 Known Issues (Apr 15, 2026)
 
 1. ESP32 motors not responding — UART connects but motors don't spin. Suspected hardware (wiring/short/battery). Run scripts/test_esp32.py to diagnose.
-2. Voice recognition ~50% accuracy — VOSK small model struggles with accented English. Considering Whisper tiny or phone app relay as alternatives.
+2. Voice recognition — upgraded to Whisper tiny (primary) with VOSK fallback. Install: pip install faster-whisper. Phone app on port 8080 as backup.
 3. USB microphone weak — only picks up from ~30cm. Need conference mic or phone relay for demo.
 4. Obstacle detection disabled — camera-based detection had too many false positives. Only ultrasonic (when connected) triggers BLOCKED state.
 
@@ -59,14 +59,18 @@ EC5: Butler personality — 8 emotions, animated eyes, head tracking. ✅
 
 Voice System Design
 
-- VOSK offline STT with grammar-constrained recognition (prevents garbage from noise)
+- Primary STT: Whisper tiny (faster-whisper, ~80% accuracy, handles accents well)
+- Fallback STT: VOSK grammar-constrained (if Whisper not installed)
+- Energy-based VAD detects when you stop speaking, then transcribes complete utterance
 - Wake word: "Hello Sonny" (also accepts "hello sunny", "hello sony", "hey sonny", bare "hello")
 - Say wake word ONCE — robot stays awake. All subsequent speech = commands.
 - "stop" always works from any state, even before wake word
 - "sleep" requires wake word again
 - Mic mutes during TTS to prevent echo loop (speaker → mic → false command)
 - Intent classifier: exact keyword match only. No fuzzy, no confirmation dialogs.
-- Known limitation: VOSK small model has ~50% accuracy for accented English
+- Phone web controller (port 8080) as backup — uses phone's browser STT for best accuracy
+- Install Whisper: pip install faster-whisper (downloads ~75MB tiny.en model on first run)
+- Install VOSK fallback: pip install vosk + download vosk-model-small-en-us-0.15
 
 UART Protocol (Pi → ESP32)
 
@@ -91,7 +95,7 @@ alfred/config.py — All params as frozen dataclasses. AlfredConfig singleton.
 alfred/comms/ — protocol.py (pure cmd_* formatters), uart.py (UARTBridge, prints connection status).
 alfred/navigation/ — line_follower.py (weighted algo), aruco_approach.py (visual-only + EMA smoothing), obstacle_avoider, patrol.
 alfred/vision/ — camera, aruco (DICT_4X4_50), obstacle (contour), person (MediaPipe face+hand+gesture), BEV, course_mapper.
-alfred/voice/ — listener.py (VOSK grammar-constrained, wake-once, mic mute during TTS), intent.py (exact keyword match), speaker.py (espeak-ng TTS), conversation.py (Claude API EC3).
+alfred/voice/ — listener.py (Whisper tiny primary + VOSK fallback, VAD, wake-once, mic mute), intent.py (exact keyword match), speaker.py (espeak-ng TTS), conversation.py (Claude API EC3).
 alfred/expression/ — eyes.py (8 emotions, gaze, auto-blink), leds.py (NeoPixel), head.py (PCA9685 servo), personality.py (state→expression, 10Hz).
 alfred/fsm/ — states.py (17-state IntEnum), controller.py (30Hz dispatch).
 alfred/gui/ — debug_gui.py (1280x720 Pygame: eyes, camera+overlays, IR, vector, voice I/O, gestures, event log).

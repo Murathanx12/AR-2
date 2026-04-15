@@ -1,7 +1,14 @@
-"""Voice listener — wake-word detection and speech-to-text using VOSK.
+"""Voice listener — speech-to-text with Whisper (primary) or VOSK (fallback).
 
-Uses grammar-constrained VOSK for accurate command recognition (no garbage).
-Mutes recognition while robot is speaking (prevents mic hearing speaker).
+Whisper tiny is far more accurate than VOSK for accented English.
+Falls back to VOSK grammar-constrained mode if Whisper is not installed.
+
+Design:
+- Record audio, detect silence (energy-based VAD)
+- Send complete utterance to Whisper/VOSK for transcription
+- Wake word "Hello Sonny" only needed once, then stays awake
+- "stop" always works, even before wake
+- Mic mutes during TTS to prevent echo
 """
 
 import threading
@@ -9,6 +16,10 @@ import time
 import logging
 import json
 import os
+import struct
+import math
+import io
+import wave
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +29,28 @@ try:
 except (ImportError, OSError):
     _HAS_PYAUDIO = False
 
+# Try Whisper first (primary — better accuracy)
+_HAS_WHISPER = False
+_whisper_model = None
 try:
-    from vosk import Model, KaldiRecognizer
+    from faster_whisper import WhisperModel
+    _HAS_WHISPER = True
+    logger.info("faster-whisper available")
+except ImportError:
+    try:
+        import whisper as _openai_whisper
+        _HAS_WHISPER = True
+        logger.info("openai-whisper available")
+    except ImportError:
+        pass
+
+# VOSK as fallback
+_HAS_VOSK = False
+try:
+    from vosk import Model as VoskModel, KaldiRecognizer
     _HAS_VOSK = True
 except ImportError:
-    _HAS_VOSK = False
+    pass
 
 
 WAKE_VARIANTS = {
@@ -34,9 +62,8 @@ WAKE_VARIANTS = {
 
 WAKE_MAYBE = {"hello", "hallo", "halo", "hey", "hi"}
 
-# Grammar: all words VOSK is allowed to recognize.
-# This prevents it from hearing random sentences from background noise.
-GRAMMAR = json.dumps([
+# VOSK grammar fallback
+VOSK_GRAMMAR = json.dumps([
     "hello", "hey", "hi", "halo", "hallo",
     "sonny", "sunny", "sony", "son",
     "follow", "the", "track", "line", "path",
@@ -57,35 +84,50 @@ GRAMMAR = json.dumps([
 
 
 class VoiceListener:
-    """Grammar-constrained VOSK listener with forgiving wake word."""
+    """STT listener: Whisper tiny (primary) with VOSK fallback.
+
+    Uses energy-based VAD to detect when you stop speaking,
+    then transcribes the complete utterance.
+    """
 
     SAMPLE_RATE = 16000
-    CHUNK_SIZE = 4000
+    CHUNK_SIZE = 1024         # ~64ms per chunk at 16kHz
+    SILENCE_THRESHOLD = 500   # RMS energy below this = silence
+    SILENCE_DURATION = 0.8    # seconds of silence to end utterance
+    MIN_SPEECH_DURATION = 0.3 # minimum speech to process (ignore clicks/noise)
+    MAX_SPEECH_DURATION = 10  # max seconds per utterance
 
     def __init__(self, wake_phrase="hello sonny", model_path=None):
         self._model_path = model_path
         self._running = False
         self._callback = None
         self._thread = None
-        self._speaker = None  # set via set_speaker() to mute during TTS
+        self._speaker = None
+        self._engine = None  # "whisper" or "vosk"
 
         self._lock = threading.Lock()
         self._awake = False
         self._wake_detected = False
-        self._waiting_confirm = False
         self._last_text = ""
-        self._muted_until = 0  # timestamp — ignore audio until this time
+        self._muted_until = 0
 
     @property
     def language(self):
         return "en"
 
+    @property
+    def engine(self):
+        return self._engine or "none"
+
     def set_speaker(self, speaker):
-        """Link speaker so we can mute mic while robot talks."""
         self._speaker = speaker
 
     def start(self):
-        if not _HAS_PYAUDIO or not _HAS_VOSK:
+        if not _HAS_PYAUDIO:
+            print("[Voice] pyaudio not installed - voice disabled")
+            return
+        if not _HAS_WHISPER and not _HAS_VOSK:
+            print("[Voice] No STT engine (install faster-whisper or vosk)")
             return
         self._running = True
         self._thread = threading.Thread(target=self._listen_loop, daemon=True)
@@ -108,7 +150,6 @@ class VoiceListener:
     def put_to_sleep(self):
         with self._lock:
             self._awake = False
-            self._waiting_confirm = False
 
     @property
     def last_text(self):
@@ -120,14 +161,81 @@ class VoiceListener:
         with self._lock:
             return self._awake
 
-    @property
-    def is_waiting_confirm(self):
-        with self._lock:
-            return self._waiting_confirm
+    # ---- Whisper setup ----
 
-    def _find_model(self):
-        if self._model_path and os.path.isdir(self._model_path):
-            return self._model_path
+    def _init_whisper(self):
+        """Load Whisper tiny model. Returns True if successful."""
+        global _whisper_model
+        if _whisper_model is not None:
+            return True
+        try:
+            from faster_whisper import WhisperModel
+            print("[Voice] Loading Whisper tiny model (faster-whisper)...")
+            _whisper_model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+            self._engine = "whisper"
+            print("[Voice] Whisper tiny loaded - high accuracy mode")
+            return True
+        except ImportError:
+            pass
+        try:
+            import whisper as _ow
+            print("[Voice] Loading Whisper tiny model (openai-whisper)...")
+            _whisper_model = _ow.load_model("tiny.en")
+            self._engine = "whisper"
+            print("[Voice] Whisper tiny loaded - high accuracy mode")
+            return True
+        except Exception as e:
+            print(f"[Voice] Whisper load failed: {e}")
+        return False
+
+    def _transcribe_whisper(self, audio_data):
+        """Transcribe audio bytes using Whisper. Returns text string."""
+        global _whisper_model
+        if _whisper_model is None:
+            return ""
+
+        # Convert raw PCM to WAV in memory
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(self.SAMPLE_RATE)
+            wf.writeframes(audio_data)
+        wav_buffer.seek(0)
+
+        try:
+            # faster-whisper API
+            if hasattr(_whisper_model, 'transcribe') and hasattr(_whisper_model, 'model'):
+                segments, _ = _whisper_model.transcribe(
+                    wav_buffer, language="en", beam_size=1,
+                    vad_filter=True,
+                )
+                return " ".join(s.text.strip() for s in segments).lower().strip()
+            else:
+                # faster-whisper returns (segments, info)
+                segments, _ = _whisper_model.transcribe(
+                    wav_buffer, language="en", beam_size=1,
+                )
+                return " ".join(s.text.strip() for s in segments).lower().strip()
+        except Exception:
+            pass
+
+        # openai-whisper API
+        try:
+            import numpy as np
+            audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+            result = _whisper_model.transcribe(
+                audio_np, language="en", fp16=False,
+                task="transcribe",
+            )
+            return result.get("text", "").lower().strip()
+        except Exception as e:
+            logger.error(f"Whisper transcribe error: {e}")
+            return ""
+
+    # ---- VOSK setup ----
+
+    def _find_vosk_model(self):
         names = ["vosk-model-small-en-us-0.15", "vosk-model-en-us-0.22-lgraph"]
         dirs = [
             os.getcwd(),
@@ -145,18 +253,48 @@ class VoiceListener:
                     return p
         return None
 
+    # ---- VAD (Voice Activity Detection) ----
+
+    @staticmethod
+    def _rms(data):
+        """Calculate RMS energy of audio chunk."""
+        count = len(data) // 2
+        if count == 0:
+            return 0
+        shorts = struct.unpack(f"<{count}h", data)
+        sum_sq = sum(s * s for s in shorts)
+        return int(math.sqrt(sum_sq / count))
+
+    # ---- Main loop ----
+
     def _listen_loop(self):
-        model_path = self._find_model()
-        if not model_path:
-            logger.error("VOSK model not found!")
+        # Try Whisper first, fall back to VOSK
+        use_whisper = False
+        vosk_rec = None
+
+        if _HAS_WHISPER:
+            use_whisper = self._init_whisper()
+
+        if not use_whisper and _HAS_VOSK:
+            model_path = self._find_vosk_model()
+            if model_path:
+                try:
+                    model = VoskModel(model_path)
+                    vosk_rec = KaldiRecognizer(model, self.SAMPLE_RATE, VOSK_GRAMMAR)
+                    self._engine = "vosk"
+                    print(f"[Voice] VOSK loaded from {model_path} (fallback mode)")
+                except Exception as e:
+                    print(f"[Voice] VOSK load failed: {e}")
+                    return
+            else:
+                print("[Voice] No VOSK model found")
+                return
+
+        if not use_whisper and vosk_rec is None:
+            print("[Voice] No STT engine available")
             return
 
-        try:
-            model = Model(model_path)
-        except Exception as e:
-            logger.error(f"Failed to load VOSK model: {e}")
-            return
-
+        # Open mic
         p = pyaudio.PyAudio()
         try:
             stream = p.open(
@@ -165,12 +303,27 @@ class VoiceListener:
                 frames_per_buffer=self.CHUNK_SIZE,
             )
         except Exception as e:
-            logger.error(f"Failed to open audio: {e}")
+            print(f"[Voice] Failed to open mic: {e}")
             p.terminate()
             return
 
-        rec = KaldiRecognizer(model, self.SAMPLE_RATE, GRAMMAR)
-        logger.info("Voice ready. Say 'Hello Sonny' to wake up.")
+        print(f"[Voice] Ready ({self._engine}). Say 'Hello Sonny' to wake up.")
+
+        if use_whisper:
+            self._whisper_loop(stream, p)
+        else:
+            self._vosk_loop(stream, p, vosk_rec)
+
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+
+    def _whisper_loop(self, stream, pyaudio_instance):
+        """Main loop using Whisper with energy-based VAD."""
+        audio_buffer = bytearray()
+        is_speaking = False
+        silence_start = 0
+        speech_start = 0
 
         while self._running:
             try:
@@ -178,7 +331,75 @@ class VoiceListener:
                 if not data:
                     continue
 
-                # Skip if robot is currently speaking (prevent echo)
+                # Mute during TTS
+                if self._speaker and self._speaker.is_speaking:
+                    self._muted_until = time.monotonic() + 1.0
+                    audio_buffer.clear()
+                    is_speaking = False
+                    continue
+                if time.monotonic() < self._muted_until:
+                    continue
+
+                energy = self._rms(data)
+
+                if energy > self.SILENCE_THRESHOLD:
+                    # Speech detected
+                    if not is_speaking:
+                        is_speaking = True
+                        speech_start = time.monotonic()
+                        audio_buffer.clear()
+                    audio_buffer.extend(data)
+                    silence_start = 0
+
+                    # Safety: max duration
+                    if time.monotonic() - speech_start > self.MAX_SPEECH_DURATION:
+                        self._process_audio(bytes(audio_buffer))
+                        audio_buffer.clear()
+                        is_speaking = False
+
+                elif is_speaking:
+                    # Silence after speech
+                    audio_buffer.extend(data)
+                    if silence_start == 0:
+                        silence_start = time.monotonic()
+                    elif time.monotonic() - silence_start >= self.SILENCE_DURATION:
+                        # End of utterance
+                        duration = time.monotonic() - speech_start
+                        if duration >= self.MIN_SPEECH_DURATION:
+                            self._process_audio(bytes(audio_buffer))
+                        audio_buffer.clear()
+                        is_speaking = False
+                        silence_start = 0
+
+            except Exception as e:
+                logger.error(f"Voice error: {e}")
+                time.sleep(0.5)
+
+    def _process_audio(self, audio_data):
+        """Transcribe audio with Whisper and process the text."""
+        text = self._transcribe_whisper(audio_data)
+        if not text:
+            return
+
+        # Filter out whisper hallucinations (common on silence)
+        junk = {"you", "thank you", "thanks for watching", "bye", "...", ""}
+        if text in junk:
+            return
+
+        with self._lock:
+            self._last_text = text
+
+        print(f"[Voice|Whisper] '{text}'")
+        self._process(text)
+
+    def _vosk_loop(self, stream, pyaudio_instance, rec):
+        """Fallback VOSK loop (grammar-constrained, streaming)."""
+        while self._running:
+            try:
+                data = stream.read(self.CHUNK_SIZE * 4, exception_on_overflow=False)
+                if not data:
+                    continue
+
                 if self._speaker and self._speaker.is_speaking:
                     self._muted_until = time.monotonic() + 1.0
                     continue
@@ -190,8 +411,6 @@ class VoiceListener:
                     text = result.get("text", "").lower().strip()
                     if not text or text == "[unk]":
                         continue
-
-                    # Filter out junk — must have at least one real word
                     real_words = [w for w in text.split() if w != "[unk]" and len(w) > 1]
                     if not real_words:
                         continue
@@ -199,34 +418,23 @@ class VoiceListener:
                     with self._lock:
                         self._last_text = text
 
-                    logger.info(f"[Voice] '{text}'")
+                    print(f"[Voice|VOSK] '{text}'")
                     self._process(text)
 
             except Exception as e:
                 logger.error(f"Voice error: {e}")
                 time.sleep(0.5)
 
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
+    # ---- Text processing (shared by both engines) ----
 
     def _process(self, text):
-        words = set(text.split()) - {"[unk]", "the", "a", "to", "please"}
+        words = set(text.split()) - {"the", "a", "to", "please", "can", "you",
+                                      "i", "want", "would", "like", "it", "[unk]"}
 
         # "stop" always works
         if words & {"stop", "halt", "freeze"}:
             if self._callback:
                 self._callback("stop")
-            return
-
-        # Waiting for yes/no
-        if self._waiting_confirm:
-            with self._lock:
-                self._waiting_confirm = False
-            if words & {"yes", "yeah", "yep", "sure", "okay", "ok"}:
-                self._do_wake(text)
-            else:
-                logger.info("Confirmation denied")
             return
 
         # Already awake — everything is a command
@@ -236,15 +444,15 @@ class VoiceListener:
             return
 
         # Not awake — check wake word
+        lower = text.lower()
         for wake in WAKE_VARIANTS:
-            if wake in text:
-                after = text.split(wake, 1)[-1].strip()
+            if wake in lower:
+                after = lower.split(wake, 1)[-1].strip()
                 self._do_wake(after)
                 return
 
-        # Bare "hello" etc
+        # Bare "hello" etc or close variants
         if words and words.issubset(WAKE_MAYBE | {"sonny", "sunny", "sony", "son"}):
-            # Close enough — just wake up
             self._do_wake("")
             return
 
@@ -252,7 +460,6 @@ class VoiceListener:
         with self._lock:
             self._awake = True
             self._wake_detected = True
-            self._waiting_confirm = False
-        logger.info("AWAKE")
+        print("[Voice] AWAKE")
         if command_after and self._callback:
             self._callback(command_after)
