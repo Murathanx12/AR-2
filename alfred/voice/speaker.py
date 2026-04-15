@@ -78,30 +78,64 @@ class Speaker:
     """Text-to-speech and sound playback.
 
     Tries piper-tts first, falls back to espeak-ng/espeak.
+    Supports English and Turkish with runtime language switching.
     Sound playback uses pygame.mixer.
     """
 
     PHRASES = {
-        "greet": "Good day, I am Sonny. How may I help you?",
-        "acknowledge": "Right away.",
-        "confused": "I'm not sure I understand. Could you repeat that?",
-        "goodbye": "Until next time. Take care!",
-        "follow": "Following the track now.",
-        "stop": "Stopping immediately.",
-        "dance": "Time to dance!",
-        "photo": "Say cheese!",
-        "patrol": "Starting patrol mode.",
-        "sleep": "Going to sleep. Say Hello Sonny to wake me.",
-        "lost": "I seem to have lost the line. Let me find it.",
-        "arrived": "I have arrived at the destination.",
-        "blocked": "Something is in the way. Let me find another route.",
+        "en": {
+            "greet": "Good day, I am Sonny. How may I help you?",
+            "acknowledge": "Right away.",
+            "confused": "I'm not sure I understand. Could you repeat that?",
+            "goodbye": "Until next time. Take care!",
+            "follow": "Following the track now.",
+            "stop": "Stopping immediately.",
+            "dance": "Time to dance!",
+            "photo": "Say cheese!",
+            "patrol": "Starting patrol mode.",
+            "sleep": "Going to sleep. Say Hello Sonny to wake me.",
+            "lost": "I seem to have lost the line. Let me find it.",
+            "arrived": "I have arrived at the destination.",
+            "blocked": "Something is in the way. Please clear the path.",
+            "lang_switch": "Switching to Turkish.",
+            "searching": "Searching for the marker.",
+            "approaching": "Marker found. Approaching.",
+            "path_clear": "Path clear. Resuming.",
+            "person_greet": "Hello! How may I help you?",
+            "delivery_ready": "I have arrived at the marker. Your delivery is ready.",
+        },
+        "tr": {
+            "greet": "Iyi gunler, ben Sonny. Size nasil yardimci olabilirim?",
+            "acknowledge": "Hemen yapiyorum.",
+            "confused": "Anlayamadim. Tekrar eder misiniz?",
+            "goodbye": "Gorusmek uzere. Kendinize iyi bakin!",
+            "follow": "Cizgiyi takip ediyorum.",
+            "stop": "Duruyorum.",
+            "dance": "Dans zamani!",
+            "photo": "Gulumseyin!",
+            "patrol": "Devriye moduna geciyorum.",
+            "sleep": "Uyku moduna geciyorum. Merhaba Sonny diyerek uyandirin.",
+            "lost": "Cizgiyi kaybettim. Bulmaya calisiyorum.",
+            "arrived": "Hedefe vardim.",
+            "blocked": "Yolda engel var. Lutfen yolu temizleyin.",
+            "lang_switch": "Ingilizceye geciyorum.",
+            "searching": "Isaretci araniyor.",
+            "approaching": "Isaretci bulundu. Yaklasiyorum.",
+            "path_clear": "Yol temiz. Devam ediyorum.",
+            "person_greet": "Merhaba! Size nasil yardimci olabilirim?",
+            "delivery_ready": "Isaretciye vardim. Teslimatiniz hazir.",
+        },
     }
 
-    def __init__(self, piper_voice=None, assets_dir=None):
+    # Flat fallback for backward compatibility
+    PHRASES_FLAT = PHRASES["en"]
+
+    def __init__(self, piper_voice=None, assets_dir=None, language="en"):
         """
         Args:
             piper_voice: Path to piper .onnx model, or None to auto-detect.
             assets_dir: Directory containing sound files. Defaults to assets/sounds/.
+            language: Initial language ("en" or "tr").
         """
         self._piper_voice = piper_voice or _find_piper_model()
         self._assets_dir = assets_dir or os.path.join(
@@ -109,6 +143,17 @@ class Speaker:
         )
         self._speaking = False
         self._lock = threading.Lock()
+        self._language = language
+
+    @property
+    def language(self):
+        return self._language
+
+    @language.setter
+    def language(self, lang):
+        if lang in self.PHRASES:
+            self._language = lang
+            logger.info(f"Speaker language set to: {lang}")
 
     def say(self, text):
         """Speak text using available TTS engine. Non-blocking.
@@ -116,15 +161,17 @@ class Speaker:
         Args:
             text: Text string to speak, or a key from PHRASES dict.
         """
-        # Resolve phrase keys
-        actual_text = self.PHRASES.get(text, text)
+        # Resolve phrase keys: try current language first, fall back to English
+        lang_phrases = self.PHRASES.get(self._language, self.PHRASES["en"])
+        actual_text = lang_phrases.get(text, self.PHRASES["en"].get(text, text))
 
         thread = threading.Thread(target=self._speak_sync, args=(actual_text,), daemon=True)
         thread.start()
 
     def say_sync(self, text):
         """Speak text synchronously (blocks until done)."""
-        actual_text = self.PHRASES.get(text, text)
+        lang_phrases = self.PHRASES.get(self._language, self.PHRASES["en"])
+        actual_text = lang_phrases.get(text, self.PHRASES["en"].get(text, text))
         self._speak_sync(actual_text)
 
     def _speak_sync(self, text):
@@ -140,18 +187,31 @@ class Speaker:
                         shell=True, timeout=30
                     )
                 elif engine in ("espeak-ng", "espeak"):
-                    # Try mbrola voice first (much more natural)
-                    try:
-                        subprocess.run(
-                            [engine, "-v", "mb-us1", "-s", "160", "-p", "40", text],
-                            timeout=30, capture_output=True, check=True
-                        )
-                    except (subprocess.CalledProcessError, FileNotFoundError):
-                        # Fallback to default espeak voice
-                        subprocess.run(
-                            [engine, "-s", "150", text],
-                            timeout=30, capture_output=True
-                        )
+                    # Select voice based on language
+                    if self._language == "tr":
+                        # Turkish voice
+                        try:
+                            subprocess.run(
+                                [engine, "-v", "tr", "-s", "160", "-p", "40", text],
+                                timeout=30, capture_output=True, check=True
+                            )
+                        except (subprocess.CalledProcessError, FileNotFoundError):
+                            subprocess.run(
+                                [engine, "-s", "150", text],
+                                timeout=30, capture_output=True
+                            )
+                    else:
+                        # English — try mbrola voice first (much more natural)
+                        try:
+                            subprocess.run(
+                                [engine, "-v", "mb-us1", "-s", "160", "-p", "40", text],
+                                timeout=30, capture_output=True, check=True
+                            )
+                        except (subprocess.CalledProcessError, FileNotFoundError):
+                            subprocess.run(
+                                [engine, "-s", "150", text],
+                                timeout=30, capture_output=True
+                            )
                 else:
                     logger.info(f"[TTS] {text}")
             except subprocess.TimeoutExpired:

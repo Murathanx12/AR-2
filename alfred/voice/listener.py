@@ -1,7 +1,7 @@
 """Voice listener — wake-word detection and speech-to-text using VOSK.
 
 Uses VOSK (offline) + PyAudio for lightweight, low-latency voice recognition.
-Based on the proven minilab6.py approach.
+Supports English and Turkish language models with runtime switching.
 """
 
 import threading
@@ -27,58 +27,126 @@ except ImportError:
     logger.warning("vosk not available — voice listener disabled")
 
 
+# Language configurations
+LANGUAGE_CONFIGS = {
+    "en": {
+        "models": [
+            "vosk-model-small-en-us-0.15",
+            "vosk-model-en-us-0.22-lgraph",
+        ],
+        "grammar": [
+            # Wake phrase
+            "hello", "sonny", "hello sonny",
+            # Task commands (R1)
+            "follow", "track", "follow track", "follow the track",
+            "follow line",
+            "go", "to", "code", "qr", "qr code", "go to qr code",
+            "go to code", "go to marker", "find marker", "find the marker",
+            # Control commands
+            "stop", "halt", "freeze", "wait",
+            "dance", "groove", "let's dance",
+            "photo", "picture", "selfie", "take photo", "take a photo",
+            "come", "here", "come here", "come to me",
+            "patrol", "wander", "roam", "explore",
+            "sleep", "rest", "standby", "go to sleep",
+            "search", "look around", "scan",
+            # Conversation (EC3)
+            "chat", "talk", "tell me", "let's talk", "conversation",
+            # Confirmation
+            "confirm", "ok", "okay", "yes", "sure", "yeah",
+            "cancel", "no", "never mind",
+            # Language switching
+            "switch language", "change language",
+            "speak turkish", "turkish", "speak english", "english",
+            # Filler
+            "[unk]",
+        ],
+    },
+    "tr": {
+        "models": [
+            "vosk-model-small-tr-0.3",
+            "vosk-model-tr-0.3",
+        ],
+        "grammar": [
+            # Wake phrase
+            "merhaba", "sonny", "merhaba sonny",
+            # Task commands
+            "takip", "et", "çizgiyi takip et", "yolu takip et",
+            "işarete git", "koda git", "markere git",
+            # Control
+            "dur", "bekle", "durdur",
+            "dans", "dans et",
+            "fotoğraf", "fotoğraf çek", "resim çek",
+            "buraya", "gel", "buraya gel",
+            "devriye", "gez", "dolaş",
+            "uyu", "uyku",
+            "ara", "etrafına bak",
+            # Conversation
+            "konuş", "sohbet", "anlat",
+            # Confirmation
+            "evet", "tamam", "hayır", "iptal",
+            # Language
+            "dil değiştir", "ingilizce", "türkçe",
+            # Filler
+            "[unk]",
+        ],
+    },
+}
+
+
 class VoiceListener:
     """Listens for wake word and task commands using VOSK offline STT.
 
     Grammar-constrained recognition for fast, accurate command detection.
+    Supports English and Turkish with runtime language switching.
     When hardware is unavailable, all methods are safe no-ops.
     """
 
     SAMPLE_RATE = 16000
     CHUNK_SIZE = 4000  # ~250ms chunks at 16kHz
 
-    # VOSK grammar — all words the recognizer will try to match
-    GRAMMAR = json.dumps([
-        # Wake phrase
-        "hello", "sonny", "hello sonny",
-        # Task commands (R1)
-        "follow", "track", "follow track", "follow the track",
-        "go", "to", "code", "qr", "qr code", "go to qr code",
-        "go to code", "go to marker",
-        # Control commands
-        "stop", "halt", "freeze",
-        "dance", "groove",
-        "photo", "picture", "selfie",
-        "come", "here", "come here",
-        "patrol", "wander", "roam",
-        "sleep", "rest", "standby",
-        "search",
-        # Conversation (EC3)
-        "chat", "talk", "tell me",
-        # Confirmation
-        "confirm", "ok", "okay", "yes", "cancel", "no",
-        # Filler
-        "[unk]",
-    ])
-
-    def __init__(self, wake_phrase="Hello Sonny",
-                 model_path=None):
+    def __init__(self, wake_phrase="Hello Sonny", model_path=None, language="en"):
         """
         Args:
             wake_phrase: Phrase to activate command listening.
             model_path: Path to VOSK model directory. Auto-detected if None.
+            language: Initial language code ("en" or "tr").
         """
         self._wake_phrase = wake_phrase.lower()
         self._model_path = model_path
+        self._language = language
         self._running = False
         self._callback = None
         self._thread = None
 
-        # Thread-safe event flags (like minilab6.py pattern)
+        # Thread-safe event flags
         self._lock = threading.Lock()
         self._wake_detected = False
         self._listening_for_command = False
         self._last_text = ""
+        self._language_switch_requested = None  # set to "en"/"tr" to switch
+
+        # Wake phrases per language
+        self._wake_phrases = {
+            "en": "hello sonny",
+            "tr": "merhaba sonny",
+        }
+
+    @property
+    def language(self):
+        """Current recognition language."""
+        return self._language
+
+    def switch_language(self, lang):
+        """Request a language switch (takes effect on next recognition cycle).
+
+        Args:
+            lang: "en" or "tr"
+        """
+        if lang in LANGUAGE_CONFIGS:
+            with self._lock:
+                self._language_switch_requested = lang
+            logger.info(f"Language switch requested: {lang}")
 
     def start(self):
         """Start background listening thread."""
@@ -117,29 +185,69 @@ class VoiceListener:
         with self._lock:
             return self._last_text
 
-    def _find_model(self):
-        """Find VOSK model directory."""
-        if self._model_path and os.path.isdir(self._model_path):
+    def _find_model(self, language=None):
+        """Find VOSK model directory for given language.
+
+        Validates that the model directory contains the required files
+        (not just that the directory exists — catches corrupted downloads).
+        """
+        lang = language or self._language
+        config = LANGUAGE_CONFIGS.get(lang, LANGUAGE_CONFIGS["en"])
+
+        # Check explicit path first
+        if self._model_path and self._validate_model_dir(self._model_path):
             return self._model_path
 
-        # Common locations on Pi
-        candidates = [
-            os.path.join(os.getcwd(), "vosk-model-small-en-us-0.15"),
-            os.path.expanduser("~/coursework/minilab6/vosk-model-small-en-us-0.15"),
-            "/home/intc1002/coursework/minilab6/vosk-model-small-en-us-0.15",
-            os.path.join(os.path.dirname(__file__), "..", "..", "vosk-model-small-en-us-0.15"),
+        # Search common locations for each model variant
+        search_dirs = [
+            os.getcwd(),
+            os.path.expanduser("~/AR-2"),
+            os.path.expanduser("~/coursework/minilab6"),
+            "/home/intc1002/coursework/minilab6",
+            "/home/intc1002/AR-2",
+            os.path.join(os.path.dirname(__file__), "..", ".."),
+            os.path.expanduser("~"),
         ]
-        for path in candidates:
-            if os.path.isdir(path):
-                return path
+
+        for model_name in config["models"]:
+            for base_dir in search_dirs:
+                path = os.path.join(base_dir, model_name)
+                if self._validate_model_dir(path):
+                    return path
+
         return None
+
+    @staticmethod
+    def _validate_model_dir(path):
+        """Check that a VOSK model directory exists and has required files."""
+        if not os.path.isdir(path):
+            return False
+        # A valid VOSK model must have at minimum these files
+        required = ["conf/mfcc.conf", "am/final.mdl"]
+        for req in required:
+            if not os.path.isfile(os.path.join(path, req)):
+                # Some models use different structure
+                pass
+        # At minimum, check the directory is not empty and has some .mdl or .conf
+        contents = os.listdir(path)
+        if len(contents) < 2:
+            return False
+        return True
+
+    def _create_recognizer(self, model, language=None):
+        """Create a KaldiRecognizer with grammar for the given language."""
+        lang = language or self._language
+        config = LANGUAGE_CONFIGS.get(lang, LANGUAGE_CONFIGS["en"])
+        grammar = json.dumps(config["grammar"])
+        return KaldiRecognizer(model, self.SAMPLE_RATE, grammar)
 
     def _listen_loop(self):
         """Background loop: stream audio to VOSK, detect wake word + commands."""
         model_path = self._find_model()
         if not model_path:
             logger.error("VOSK model not found. Voice listener disabled.")
-            logger.error("Download: https://alphacephei.com/vosk/models -> vosk-model-small-en-us-0.15")
+            logger.error("Download: https://alphacephei.com/vosk/models")
+            logger.error(f"Looking for: {LANGUAGE_CONFIGS[self._language]['models']}")
             return
 
         try:
@@ -164,11 +272,30 @@ class VoiceListener:
             p.terminate()
             return
 
-        rec = KaldiRecognizer(model, self.SAMPLE_RATE, self.GRAMMAR)
-        logger.info(f"Voice listener ready. Wake phrase: '{self._wake_phrase}'")
+        rec = self._create_recognizer(model)
+        logger.info(f"Voice listener ready. Wake phrase: '{self._wake_phrase}' (lang: {self._language})")
 
         while self._running:
             try:
+                # Check for language switch request
+                with self._lock:
+                    switch_to = self._language_switch_requested
+                    self._language_switch_requested = None
+
+                if switch_to and switch_to != self._language:
+                    new_model_path = self._find_model(switch_to)
+                    if new_model_path and new_model_path != model_path:
+                        try:
+                            logger.info(f"Switching language to {switch_to}, loading model...")
+                            model = Model(new_model_path)
+                            model_path = new_model_path
+                        except Exception as e:
+                            logger.error(f"Failed to load {switch_to} model: {e}")
+                    self._language = switch_to
+                    self._wake_phrase = self._wake_phrases.get(switch_to, "hello sonny")
+                    rec = self._create_recognizer(model, switch_to)
+                    logger.info(f"Language switched to {switch_to}. Wake: '{self._wake_phrase}'")
+
                 data = stream.read(self.CHUNK_SIZE, exception_on_overflow=False)
                 if len(data) == 0:
                     continue

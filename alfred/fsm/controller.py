@@ -342,9 +342,25 @@ class AlfredFSM:
     def _check_ultrasonic_obstacle(self) -> bool:
         """Check ultrasonic sensor for obstacles (R4).
 
-        Returns True if obstacle detected within threshold.
+        Returns True only if sensor is connected AND obstacle within threshold.
+        Returns False if no sensor data (distance == -1).
         """
-        return self.uart.is_obstacle_detected(OBSTACLE_THRESHOLD_CM)
+        dist = self.uart.get_distance()
+        # -1 means no sensor reading (not connected or no echo)
+        if dist < 0:
+            return False
+        return 0 < dist < OBSTACLE_THRESHOLD_CM
+
+    def _check_camera_obstacle(self) -> bool:
+        """Check camera-based obstacle detection (R4).
+
+        Only triggers if a significant obstacle is detected in the center path.
+        Requires multiple consecutive frames to avoid false positives from
+        shadows or dark floor patches.
+        """
+        if not self.obstacle_detector or self._last_frame is None:
+            return True  # no detector = assume clear
+        return not self.obstacle_detector.is_path_clear(self._last_frame)
 
     def tick(self):
         """Run one FSM cycle: read sensors, dispatch state handler, update expression."""
@@ -379,6 +395,21 @@ class AlfredFSM:
         intent, confidence = self.intent_classifier.classify(text)
         print(f"[Voice] '{text}' -> {intent} ({confidence:.1f})")
 
+        # Feed to GUI
+        if self.gui:
+            self.gui.set_voice_input(text, intent, confidence)
+
+        # Handle language switching
+        if intent == "switch_language":
+            target_lang = self.intent_classifier.extract_language(text)
+            if target_lang and self.voice_listener:
+                self.voice_listener.switch_language(target_lang)
+                if self.speaker:
+                    self.speaker.say("lang_switch")
+                    self.speaker.language = target_lang
+                print(f"[Voice] Language switched to: {target_lang}")
+            return
+
         # Confirm what we heard back to the user
         INTENT_CONFIRMATIONS = {
             "follow_track": "Got it. Following the track.",
@@ -398,8 +429,13 @@ class AlfredFSM:
         confirmation = INTENT_CONFIRMATIONS.get(intent)
         if confirmation and self.speaker:
             self.speaker.say(confirmation)
+            if self.gui:
+                self.gui.set_voice_output(confirmation)
         elif intent == "unknown" and self.speaker:
-            self.speaker.say(f"I heard {text}, but I don't understand that command.")
+            unknown_msg = f"I heard {text}, but I don't understand that command."
+            self.speaker.say(unknown_msg)
+            if self.gui:
+                self.gui.set_voice_output(unknown_msg)
 
         # EC3: Handle chat/conversation intent
         if intent == "chat" and self.conversation:
@@ -425,6 +461,8 @@ class AlfredFSM:
                 self._dance_start = time.monotonic()
             elif target == State.PHOTO:
                 self._photo_taken = False
+            elif target == State.ARUCO_SEARCH and self.aruco_approach:
+                self.aruco_approach.reset()
             self.transition(target)
         elif intent == "confirm":
             pass
@@ -450,7 +488,7 @@ class AlfredFSM:
 
     def _tick_following(self):
         """Run line follower and mirror sub-FSM transitions."""
-        # R4: Check ultrasonic obstacle
+        # R4: Check ultrasonic obstacle (only if sensor connected)
         if self._check_ultrasonic_obstacle():
             self.transition(State.BLOCKED)
             return
@@ -458,12 +496,6 @@ class AlfredFSM:
         ir_bits = self.uart.get_ir_bits()
         command = self.line_follower.tick(ir_bits)
         self.uart.send(command)
-
-        # Also check camera-based obstacles
-        if self.obstacle_detector and self._last_frame is not None:
-            if not self.obstacle_detector.is_path_clear(self._last_frame):
-                self.transition(State.BLOCKED)
-                return
 
         # Mirror sub-FSM state transitions
         if self.line_follower.finished:
@@ -575,13 +607,10 @@ class AlfredFSM:
         self.line_follower.debug_vy = 0
         self.line_follower.debug_omega = 0
 
-        # Check if path cleared (both ultrasonic and camera)
+        # Check if path cleared — ultrasonic is the primary sensor
         ultrasonic_clear = not self._check_ultrasonic_obstacle()
-        camera_clear = True
-        if self.obstacle_detector and self._last_frame is not None:
-            camera_clear = self.obstacle_detector.is_path_clear(self._last_frame)
 
-        if ultrasonic_clear and camera_clear:
+        if ultrasonic_clear:
             if self.speaker:
                 self.speaker.say("Path clear. Resuming.")
             # Resume the previous state
@@ -616,24 +645,47 @@ class AlfredFSM:
             self.transition(State.FOLLOWING)
 
     def _tick_patrol(self):
-        """Autonomous wander with person detection."""
+        """Autonomous wander with person detection and gesture recognition."""
         if not self.patrol_controller:
             self.transition(State.IDLE)
             return
 
         faces = []
         obstacles = []
+        hands = []
         if self.person_detector and self._last_frame is not None:
             faces = self.person_detector.detect_faces(self._last_frame)
             self._last_faces = faces
+            # EC1: Also detect hand gestures during patrol
+            hands = self.person_detector.detect_hands(self._last_frame)
         if self.obstacle_detector and self._last_frame is not None:
             obstacles = self.obstacle_detector.detect(self._last_frame)
             self._last_obstacles = obstacles
 
+        # EC1: React to gestures
+        for hand in hands:
+            gesture = self.person_detector.get_gesture(hand)
+            if gesture == "open":  # open palm = stop
+                self.uart.send(cmd_stop())
+                if self.speaker:
+                    self.speaker.say("stop")
+                self.transition(State.IDLE)
+                return
+            elif gesture == "thumbs_up":  # thumbs up = come here
+                self.transition(State.PERSON_APPROACH)
+                return
+            elif gesture == "peace":  # peace sign = take photo
+                self._photo_taken = False
+                self.transition(State.PHOTO)
+                return
+            elif gesture == "point":  # point = follow track
+                self.line_follower.reset()
+                self.transition(State.FOLLOWING)
+                return
+
         # R4: Also check ultrasonic
         if self._check_ultrasonic_obstacle():
             self.uart.send(cmd_stop())
-            # Wait briefly then resume
             return
 
         if self.patrol_controller.should_approach_person():

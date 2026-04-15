@@ -1,6 +1,8 @@
 """Alfred V4 debug GUI — Pygame-based dashboard for monitoring and control.
 
-Enhanced from V3 linefollower GUI with camera feed, voice status, and 17-state FSM display.
+Full-screen layout for the 14" monitor or X11 forwarding.
+Shows camera feed with overlays, OLED eyes, sensor data, voice I/O,
+gesture recognition, movement vectors, and FSM state.
 """
 
 import math
@@ -16,10 +18,16 @@ except ImportError:
     _HAS_PYGAME = False
     logger.warning("pygame not installed — GUI unavailable")
 
+try:
+    import cv2
+    import numpy as np
+    _HAS_CV2 = True
+except ImportError:
+    _HAS_CV2 = False
+
 from alfred.fsm.states import State, STATE_NAMES
 
 
-# State colour map for the 17 FSM states
 STATE_COLORS = {
     State.IDLE:            (120, 120, 130),
     State.LISTENING:       (100, 100, 255),
@@ -40,21 +48,56 @@ STATE_COLORS = {
     State.SLEEPING:        (60, 60, 80),
 }
 
+STATE_DESCRIPTIONS = {
+    State.IDLE:            "Standing by — say 'Hello Sonny'",
+    State.LISTENING:       "Listening for command...",
+    State.FOLLOWING:       "Following the track",
+    State.ENDPOINT:        "Reaching destination",
+    State.PARKING:         "Parking at delivery zone",
+    State.ARUCO_SEARCH:    "Scanning for ArUco marker",
+    State.ARUCO_APPROACH:  "Approaching marker",
+    State.BLOCKED:         "Obstacle detected! Waiting...",
+    State.REROUTING:       "Finding another way",
+    State.PATROL:          "Patrolling area",
+    State.PERSON_APPROACH: "Approaching person",
+    State.DANCING:         "Dancing!",
+    State.PHOTO:           "Taking a photo!",
+    State.LOST_REVERSE:    "Lost line — reversing",
+    State.LOST_PIVOT:      "Lost line — pivoting",
+    State.STOPPING:        "Stopping...",
+    State.SLEEPING:        "Sleeping — say 'Hello Sonny' to wake",
+}
+
+
+def _pick_font(names, size, bold=False):
+    """Pick the first available system font."""
+    for name in names:
+        try:
+            f = pygame.font.SysFont(name, size, bold=bold)
+            if f:
+                return f
+        except Exception:
+            continue
+    return pygame.font.SysFont(None, size, bold=bold)
+
 
 class DebugGUI:
-    """Pygame-based debug GUI for monitoring Alfred/Sonny.
+    """Full-screen Pygame dashboard for monitoring Sonny.
 
-    Displays sensor state, vector field, FSM status, camera feed,
-    voice status, and provides keyboard control.
+    Layout (1280x720 or fullscreen):
+    ┌──────────────────────┬───────────────────────┐
+    │   HEADER: name + state + indicators          │
+    ├──────────────────────┬───────────────────────┤
+    │                      │                       │
+    │   CAMERA FEED        │   EYES + SENSORS      │
+    │   (with overlays)    │   + MOVEMENT          │
+    │                      │                       │
+    ├──────────────────────┴───────────────────────┤
+    │   VOICE INPUT | VOICE OUTPUT | GESTURES | LOG│
+    └──────────────────────────────────────────────┘
     """
 
-    def __init__(self, fsm=None, width=900, height=620):
-        """
-        Args:
-            fsm: AlfredFSM instance for reading state.
-            width: Window width.
-            height: Window height.
-        """
+    def __init__(self, fsm=None, width=1280, height=720):
         if not _HAS_PYGAME:
             raise RuntimeError("pygame is required for GUI")
 
@@ -66,71 +109,157 @@ class DebugGUI:
         self._clock = None
         self._fonts = {}
 
-        # Manual control state
         self._pressed = {'w': False, 's': False, 'a': False, 'd': False, 'q': False, 'e': False}
-        self._manual_mode = True  # start in manual
+        self._manual_mode = True
 
-        # Animated values for smooth transitions
         self._anim_vx = 0.0
         self._anim_vy = 0.0
         self._anim_omega = 0.0
 
-        # Camera frame surface
         self._camera_surface = None
 
+        # Voice / event tracking
+        self._voice_input = ""
+        self._voice_input_time = 0
+        self._voice_output = ""
+        self._voice_output_time = 0
+        self._last_gesture = ""
+        self._gesture_time = 0
+        self._last_intent = ""
+        self._last_confidence = 0.0
+        self._event_log = []
+        self._detected_markers = []
+        self._face_count = 0
+        self._hand_count = 0
+
     def start(self):
-        """Initialize pygame and open the window."""
         pygame.init()
-        self._screen = pygame.display.set_mode((self.W, self.H))
-        pygame.display.set_caption("Sonny V4 — Alfred Debug GUI")
+        # Try to match display, fall back to windowed
+        try:
+            info = pygame.display.Info()
+            if info.current_w >= 1280 and info.current_h >= 720:
+                self.W = min(info.current_w, 1280)
+                self.H = min(info.current_h, 720)
+        except Exception:
+            pass
+        self._screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
+        pygame.display.set_caption("SONNY — Project Alfred Dashboard")
         self._clock = pygame.time.Clock()
+
+        ui_fonts = ["ubuntu", "dejavusans", "segoeui", "freesans", "arial"]
+        mono_fonts = ["ubuntumono", "dejavusansmono", "consolas", "freemono", "courier"]
         self._fonts = {
-            'lg': pygame.font.SysFont(None, 32),
-            'md': pygame.font.SysFont(None, 26),
-            'sm': pygame.font.SysFont(None, 22),
-            'xs': pygame.font.SysFont(None, 18),
+            'title': _pick_font(ui_fonts, 44, bold=True),
+            'xl':    _pick_font(ui_fonts, 36, bold=True),
+            'lg':    _pick_font(ui_fonts, 28, bold=True),
+            'md':    _pick_font(ui_fonts, 22),
+            'sm':    _pick_font(ui_fonts, 18),
+            'xs':    _pick_font(ui_fonts, 15),
+            'mono':  _pick_font(mono_fonts, 20),
+            'mono_sm': _pick_font(mono_fonts, 16),
         }
         self._running = True
-        logger.info("Debug GUI started")
+        self._log("System started")
 
     def stop(self):
-        """Close the GUI."""
         self._running = False
         if _HAS_PYGAME and pygame.get_init():
             pygame.quit()
-        logger.info("Debug GUI stopped")
 
     def is_running(self):
         return self._running
 
-    def set_camera_frame(self, frame):
-        """Update the camera preview panel with a new frame.
+    def _log(self, msg):
+        self._event_log.append((time.strftime('%H:%M:%S'), msg))
+        if len(self._event_log) > 12:
+            self._event_log.pop(0)
 
-        Args:
-            frame: BGR numpy array from OpenCV, or None.
-        """
-        if frame is None or not _HAS_PYGAME:
+    def set_voice_input(self, text, intent="", confidence=0.0):
+        self._voice_input = text
+        self._voice_input_time = time.monotonic()
+        self._last_intent = intent
+        self._last_confidence = confidence
+        if text:
+            self._log(f'Heard: "{text}" → {intent} ({confidence:.0%})')
+
+    def set_voice_output(self, text):
+        self._voice_output = text
+        self._voice_output_time = time.monotonic()
+        if text:
+            self._log(f'Said: "{text}"')
+
+    def set_gesture(self, gesture):
+        if gesture and gesture != "unknown":
+            self._last_gesture = gesture
+            self._gesture_time = time.monotonic()
+            self._log(f'Gesture: {gesture}')
+
+    def set_camera_frame(self, frame):
+        if frame is None or not _HAS_PYGAME or not _HAS_CV2:
             self._camera_surface = None
             return
+
         try:
-            import cv2
-            # Resize for panel
-            small = cv2.resize(frame, (200, 150))
+            display_frame = frame.copy()
+            fsm = self.fsm
+
+            # Draw ArUco markers
+            if fsm and fsm.aruco_detector:
+                markers = fsm.aruco_detector.detect(display_frame)
+                self._detected_markers = markers
+                for m in markers:
+                    pts = m["corners"].astype(int)
+                    cv2.polylines(display_frame, [pts], True, (0, 255, 0), 3)
+                    cx, cy = int(m["center"][0]), int(m["center"][1])
+                    cv2.putText(display_frame, f"ID:{m['id']} sz:{m['size']:.0f}",
+                                (cx - 40, cy - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            # Draw face boxes
+            self._face_count = 0
+            if fsm and fsm._last_faces:
+                self._face_count = len(fsm._last_faces)
+                for face in fsm._last_faces:
+                    x, y, w, h = face["bbox"]
+                    conf = face.get("confidence", 0)
+                    cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    cv2.putText(display_frame, f"Face {conf:.0%}",
+                                (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+            # Draw obstacle boxes
+            if fsm and fsm._last_obstacles:
+                for obs in fsm._last_obstacles:
+                    if "bbox" in obs:
+                        x, y, w, h = obs["bbox"]
+                        cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                        cv2.putText(display_frame, "OBSTACLE",
+                                    (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+            # Resize to fit the camera panel
+            cam_w = int(self.W * 0.55)
+            cam_h = int(self.H * 0.65)
+            small = cv2.resize(display_frame, (cam_w, cam_h))
             rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
             self._camera_surface = pygame.surfarray.make_surface(rgb.swapaxes(0, 1))
-        except Exception:
+
+            # Hand detection count
+            self._hand_count = 0
+            if fsm and fsm.person_detector and frame is not None:
+                try:
+                    hands = fsm.person_detector.detect_hands(frame)
+                    self._hand_count = len(hands)
+                    for hand in hands:
+                        gesture = fsm.person_detector.get_gesture(hand)
+                        if gesture and gesture != "unknown":
+                            self.set_gesture(gesture)
+                except Exception:
+                    pass
+        except Exception as e:
             self._camera_surface = None
 
     def update(self):
-        """Process events and render one frame. Call at ~60Hz.
-
-        Returns:
-            False if the user closed the window, True otherwise.
-        """
         if not self._running or not _HAS_PYGAME:
             return False
 
-        # -- Event handling --
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self._running = False
@@ -139,256 +268,322 @@ class DebugGUI:
                 self._handle_keydown(event.key)
             elif event.type == pygame.KEYUP:
                 self._handle_keyup(event.key)
+            elif event.type == pygame.VIDEORESIZE:
+                self.W, self.H = event.w, event.h
+                self._screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
 
-        # -- Get FSM data --
         fsm = self.fsm
         state = fsm.state if fsm else State.IDLE
         lf = fsm.line_follower if fsm else None
         uart = fsm.uart if fsm else None
+        now = time.monotonic()
 
         bits = [0, 0, 0, 0, 0]
+        dist_cm = -1.0
         if uart and uart.is_open:
             bits = uart.get_ir_bits()
+            dist_cm = uart.get_distance()
 
         debug_vx = lf.debug_vx if lf else 0
         debug_vy = lf.debug_vy if lf else 0
         debug_omega = lf.debug_omega if lf else 0
-        internal_speed = lf.internal_speed if lf else 0.0
-        pseudo_dist = lf.pseudo_dist if lf else 0.0
-        current_speed = lf.current_speed if lf else 35
-        turn_var = lf.turn_var if lf else 0.0
 
-        active = sum(bits)
-        turn_display = (sum(b * t for b, t in zip(bits, (-7, -4.5, 0, 4.5, 7))) / active) if active > 0 else 0.0
-
-        # Smooth animation
         lerp = 0.25
         self._anim_vx += (debug_vx - self._anim_vx) * lerp
         self._anim_vy += (debug_vy - self._anim_vy) * lerp
         self._anim_omega += (debug_omega - self._anim_omega) * lerp
 
-        max_speed = 150
+        # Track voice input from listener
+        if fsm and fsm.voice_listener:
+            vtext = fsm.voice_listener.last_text
+            if vtext and vtext != self._voice_input:
+                self.set_voice_input(vtext)
 
-        # -- Render --
-        self._screen.fill((16, 18, 24))
+        # === RENDER ===
+        BG = (16, 18, 24)
+        PANEL = (26, 30, 38)
+        BORDER = (40, 45, 58)
+        DIM = (70, 75, 90)
+        self._screen.fill(BG)
 
-        LEFT_W = 360
-        RIGHT_X = 375
+        W, H = self.W, self.H
+        PAD = 8
+        HEADER_H = 60
+        BOTTOM_H = 160
+        CAM_W = int(W * 0.55)
+        RIGHT_W = W - CAM_W - PAD * 3
+        MIDDLE_H = H - HEADER_H - BOTTOM_H - PAD * 3
 
-        # === HEADER BAR ===
-        pygame.draw.rect(self._screen, (32, 36, 46), (0, 0, self.W, 48))
-        pygame.draw.line(self._screen, (50, 55, 70), (0, 48), (self.W, 48))
-        self._screen.blit(self._fonts['lg'].render("SONNY", True, (70, 160, 255)), (18, 12))
+        # ============ HEADER ============
+        pygame.draw.rect(self._screen, (28, 32, 42), (0, 0, W, HEADER_H))
+        pygame.draw.line(self._screen, BORDER, (0, HEADER_H), (W, HEADER_H))
+
+        self._screen.blit(self._fonts['title'].render("SONNY", True, (70, 160, 255)), (PAD + 8, 8))
+
+        # State
+        st_color = STATE_COLORS.get(state, (180, 180, 180))
+        st_name = STATE_NAMES.get(state, '?')
+        st_desc = STATE_DESCRIPTIONS.get(state, "")
+        st_surf = self._fonts['xl'].render(st_name, True, st_color)
+        self._screen.blit(st_surf, (W - st_surf.get_width() - PAD - 8, 2))
+        desc_surf = self._fonts['sm'].render(st_desc, True, (140, 145, 160))
+        self._screen.blit(desc_surf, (W - desc_surf.get_width() - PAD - 8, 36))
 
         # Mode pill
         mode_label = "AUTO" if not self._manual_mode else "MANUAL"
         mode_color = (0, 220, 100) if not self._manual_mode else (220, 180, 0)
-        pill_text = self._fonts['md'].render(mode_label, True, mode_color)
-        pill_w = pill_text.get_width() + 24
-        pill_rect = pygame.Rect(120, 10, pill_w, 28)
-        pygame.draw.rect(self._screen, mode_color, pill_rect, 1, border_radius=14)
-        self._screen.blit(pill_text, (132, 13))
+        pill = self._fonts['md'].render(mode_label, True, mode_color)
+        px = 180
+        pygame.draw.rect(self._screen, mode_color, (px, 16, pill.get_width() + 16, 28), 1, border_radius=14)
+        self._screen.blit(pill, (px + 8, 18))
 
-        # State pill
-        state_name = STATE_NAMES.get(state, '?')
-        st_color = STATE_COLORS.get(state, (180, 180, 180))
-        st_text = self._fonts['md'].render(state_name, True, st_color)
-        st_w = st_text.get_width() + 24
-        st_rect = pygame.Rect(self.W - st_w - 16, 10, st_w, 28)
-        pygame.draw.rect(self._screen, st_color, st_rect, 1, border_radius=14)
-        self._screen.blit(st_text, (self.W - st_w - 4, 13))
+        # Mic + Lang
+        mic_on = fsm and fsm.voice_listener is not None
+        mic_color = (0, 200, 255) if mic_on else (60, 60, 70)
+        mic_x = px + pill.get_width() + 40
+        self._screen.blit(self._fonts['sm'].render("MIC ON" if mic_on else "MIC OFF", True, mic_color), (mic_x, 20))
+        lang = "EN"
+        if fsm and fsm.voice_listener:
+            lang = fsm.voice_listener.language.upper()
+        self._screen.blit(self._fonts['sm'].render(f"| {lang}", True, (100, 160, 255)), (mic_x + 70, 20))
 
-        # Voice indicator
-        voice_active = fsm and fsm.voice_listener is not None
-        voice_color = (0, 180, 255) if voice_active else (60, 60, 70)
-        voice_label = "MIC ON" if voice_active else "MIC OFF"
-        self._screen.blit(self._fonts['xs'].render(voice_label, True, voice_color), (pill_rect.right + 20, 18))
-
-        y = 58
-
-        # === LEFT COLUMN: Sensors, Turn bar, Stats ===
-
-        # -- Sensor arc --
-        panel_h = 100
-        pygame.draw.rect(self._screen, (26, 30, 38), (10, y, LEFT_W, panel_h), border_radius=10)
-        pygame.draw.rect(self._screen, (40, 45, 58), (10, y, LEFT_W, panel_h), 1, border_radius=10)
-        self._screen.blit(self._fonts['xs'].render("IR SENSORS", True, (80, 85, 100)), (20, y + 6))
-
-        sensor_names = ['W', 'NW', 'N', 'NE', 'E']
-        arc_positions = [(55, 62), (115, 34), (180, 22), (245, 34), (305, 62)]
-        for i, (sx, sy) in enumerate(arc_positions):
-            on = bits[i]
-            cx, cy = sx, y + sy
-            if on:
-                glow = pygame.Surface((48, 48), pygame.SRCALPHA)
-                pygame.draw.circle(glow, (0, 200, 60, 40), (24, 24), 22)
-                self._screen.blit(glow, (cx - 24, cy - 18))
-            box_color = (0, 200, 60) if on else (42, 46, 56)
-            border_color = (0, 255, 80) if on else (55, 60, 72)
-            pygame.draw.rect(self._screen, box_color, (cx - 24, cy - 13, 48, 28), border_radius=6)
-            pygame.draw.rect(self._screen, border_color, (cx - 24, cy - 13, 48, 28), 1, border_radius=6)
-            lbl = self._fonts['sm'].render(sensor_names[i], True, (255, 255, 255) if on else (90, 90, 100))
-            self._screen.blit(lbl, (cx - lbl.get_width() // 2, cy - 7))
-        y += panel_h + 8
-
-        # -- Turn indicator bar --
-        bar_h = 38
-        pygame.draw.rect(self._screen, (26, 30, 38), (10, y, LEFT_W, bar_h), border_radius=8)
-        pygame.draw.rect(self._screen, (40, 45, 58), (10, y, LEFT_W, bar_h), 1, border_radius=8)
-        bar_cx = 10 + LEFT_W // 2
-        bar_w = 240
-        pygame.draw.rect(self._screen, (42, 46, 56), (bar_cx - bar_w // 2, y + 15, bar_w, 8), border_radius=4)
-        pygame.draw.rect(self._screen, (80, 85, 100), (bar_cx - 1, y + 10, 2, 18))
-        self._screen.blit(self._fonts['xs'].render("L", True, (80, 85, 100)), (bar_cx - bar_w // 2 - 14, y + 12))
-        self._screen.blit(self._fonts['xs'].render("R", True, (80, 85, 100)), (bar_cx + bar_w // 2 + 5, y + 12))
-
-        norm_turn = max(-1.0, min(1.0, turn_display / 7.0))
-        dot_x = bar_cx + int(norm_turn * bar_w // 2)
-        dot_color = (255, 70, 70) if abs(norm_turn) > 0.6 else (255, 190, 50) if abs(norm_turn) > 0.3 else (60, 210, 110)
-        pygame.draw.circle(self._screen, dot_color, (dot_x, y + 19), 8)
-        self._screen.blit(self._fonts['xs'].render(f"{turn_display:+.1f}", True, (140, 150, 170)), (18, y + 10))
-        y += bar_h + 8
-
-        # -- Stats cards --
-        card_h = 60
-        cards = [
-            ("SPEED", f"{current_speed}", (100, 180, 255)),
-            ("ALGO", f"{internal_speed:.1f}", (180, 220, 130)),
-            ("DIST", f"{pseudo_dist:.2f}", (220, 180, 80)),
-        ]
-        card_w = (LEFT_W - 16) // 3
-        for ci, (label, value, color) in enumerate(cards):
-            cx = 10 + ci * (card_w + 4)
-            pygame.draw.rect(self._screen, (26, 30, 38), (cx, y, card_w, card_h), border_radius=8)
-            pygame.draw.rect(self._screen, (40, 45, 58), (cx, y, card_w, card_h), 1, border_radius=8)
-            self._screen.blit(self._fonts['xs'].render(label, True, (80, 85, 100)), (cx + 10, y + 8))
-            self._screen.blit(self._fonts['md'].render(value, True, color), (cx + 10, y + 28))
-        y += card_h + 8
-
-        # -- Vector readout --
-        vec_h = 42
-        pygame.draw.rect(self._screen, (26, 30, 38), (10, y, LEFT_W, vec_h), border_radius=8)
-        pygame.draw.rect(self._screen, (40, 45, 58), (10, y, LEFT_W, vec_h), 1, border_radius=8)
-        self._screen.blit(self._fonts['xs'].render("OUTPUT", True, (80, 85, 100)), (20, y + 4))
-        vxc = (100, 220, 130) if debug_vx > 0 else (220, 100, 100) if debug_vx < 0 else (110, 110, 120)
-        vyc = (100, 180, 255) if debug_vy != 0 else (110, 110, 120)
-        omc = (220, 170, 60) if debug_omega != 0 else (110, 110, 120)
-        self._screen.blit(self._fonts['sm'].render(f"vx:{debug_vx:+d}", True, vxc), (20, y + 20))
-        self._screen.blit(self._fonts['sm'].render(f"vy:{debug_vy:+d}", True, vyc), (130, y + 20))
-        self._screen.blit(self._fonts['sm'].render(f"\u03c9:{debug_omega:+d}", True, omc), (240, y + 20))
-        y += vec_h + 8
-
-        # === RIGHT COLUMN: Vector viz + Throttle + Camera ===
-        viz_w = self.W - RIGHT_X - 12
-        viz_h = 220
-        viz_cx = RIGHT_X + viz_w // 2
-        viz_cy = 58 + viz_h // 2
-        viz_r = min(viz_w, viz_h) // 2 - 16
-
-        # Vector field panel
-        pygame.draw.rect(self._screen, (26, 30, 38), (RIGHT_X, 58, viz_w, viz_h), border_radius=10)
-        pygame.draw.rect(self._screen, (40, 45, 58), (RIGHT_X, 58, viz_w, viz_h), 1, border_radius=10)
-        self._screen.blit(self._fonts['xs'].render("VECTOR FIELD", True, (80, 85, 100)), (RIGHT_X + 10, 62))
-
-        # Grid circles
-        for r_frac in [0.33, 0.66, 1.0]:
-            r = int(viz_r * r_frac)
-            pygame.draw.circle(self._screen, (34, 38, 48), (viz_cx, viz_cy), r, 1)
-        pygame.draw.line(self._screen, (34, 38, 48), (viz_cx - viz_r, viz_cy), (viz_cx + viz_r, viz_cy))
-        pygame.draw.line(self._screen, (34, 38, 48), (viz_cx, viz_cy - viz_r), (viz_cx, viz_cy + viz_r))
-
-        # Direction labels
-        self._screen.blit(self._fonts['xs'].render("FWD", True, (55, 60, 75)), (viz_cx - 10, viz_cy - viz_r - 14))
-        self._screen.blit(self._fonts['xs'].render("REV", True, (55, 60, 75)), (viz_cx - 10, viz_cy + viz_r + 3))
-        self._screen.blit(self._fonts['xs'].render("L", True, (55, 60, 75)), (viz_cx - viz_r - 10, viz_cy - 6))
-        self._screen.blit(self._fonts['xs'].render("R", True, (55, 60, 75)), (viz_cx + viz_r + 4, viz_cy - 6))
-
-        # Robot body
-        bot = 14
-        pygame.draw.rect(self._screen, (55, 60, 75), (viz_cx - bot, viz_cy - bot, bot * 2, bot * 2), border_radius=4)
-        pygame.draw.rect(self._screen, (75, 82, 100), (viz_cx - bot, viz_cy - bot, bot * 2, bot * 2), 1, border_radius=4)
-        pygame.draw.rect(self._screen, (100, 180, 255), (viz_cx - 4, viz_cy - bot - 4, 8, 5), border_radius=2)
-
-        # Vector arrow
-        arrow_scale = viz_r / max_speed
-        ax = self._anim_vy * arrow_scale
-        ay = -self._anim_vx * arrow_scale
-        arrow_len = math.sqrt(ax * ax + ay * ay)
-        if arrow_len > 3:
-            if self._anim_vx > 0:
-                arrow_color = (80, 220, 130)
-            elif self._anim_vx < -3:
-                arrow_color = (220, 80, 80)
-            else:
-                arrow_color = (80, 160, 255)
-            self._draw_arrow(self._screen, arrow_color, (viz_cx, viz_cy),
-                           (viz_cx + int(ax), viz_cy + int(ay)), width=3, head_size=11)
-
-        # Rotation arc
-        if abs(self._anim_omega) > 3:
-            arc_r = bot + 10
-            arc_color = (220, 170, 60)
-            arc_start = -0.5 if self._anim_omega > 0 else 2.6
-            arc_span = min(abs(self._anim_omega) / max_speed * 3.14, 2.8)
-            steps = max(8, int(arc_span * 12))
-            points = []
-            for s in range(steps + 1):
-                a = arc_start + (arc_span * s / steps) * (1 if self._anim_omega > 0 else -1)
-                points.append((viz_cx + int(arc_r * math.cos(a)),
-                               viz_cy + int(arc_r * math.sin(a))))
-            if len(points) > 1:
-                pygame.draw.lines(self._screen, arc_color, False, points, 2)
-                if len(points) >= 2:
-                    self._draw_arrow(self._screen, arc_color, points[-2], points[-1], width=2, head_size=7)
-
-        # Throttle gauge
-        gauge_y = 58 + viz_h + 10
-        gauge_h = 50
-        pygame.draw.rect(self._screen, (26, 30, 38), (RIGHT_X, gauge_y, viz_w, gauge_h), border_radius=8)
-        pygame.draw.rect(self._screen, (40, 45, 58), (RIGHT_X, gauge_y, viz_w, gauge_h), 1, border_radius=8)
-        self._screen.blit(self._fonts['xs'].render("THROTTLE", True, (80, 85, 100)), (RIGHT_X + 10, gauge_y + 6))
-
-        gauge_bar_w = viz_w - 24
-        gauge_fill = max(0.0, min(1.0, internal_speed / 5.0))
-        pygame.draw.rect(self._screen, (42, 46, 56), (RIGHT_X + 12, gauge_y + 24, gauge_bar_w, 12), border_radius=6)
-        fill_color = (220, 70, 70) if gauge_fill > 0.8 else (220, 180, 50) if gauge_fill > 0.5 else (60, 200, 120)
-        if gauge_fill > 0.01:
-            pygame.draw.rect(self._screen, fill_color, (RIGHT_X + 12, gauge_y + 24, int(gauge_bar_w * gauge_fill), 12), border_radius=6)
-        pct_label = f"{gauge_fill * 100:.0f}%"
-        self._screen.blit(self._fonts['sm'].render(pct_label, True, fill_color), (RIGHT_X + gauge_bar_w - 20, gauge_y + 38))
-
-        # Camera feed panel
-        cam_y = gauge_y + gauge_h + 10
-        cam_h = 160
-        pygame.draw.rect(self._screen, (26, 30, 38), (RIGHT_X, cam_y, viz_w, cam_h), border_radius=10)
-        pygame.draw.rect(self._screen, (40, 45, 58), (RIGHT_X, cam_y, viz_w, cam_h), 1, border_radius=10)
-        self._screen.blit(self._fonts['xs'].render("CAMERA", True, (80, 85, 100)), (RIGHT_X + 10, cam_y + 4))
+        # ============ MIDDLE LEFT: CAMERA ============
+        cam_x = PAD
+        cam_y = HEADER_H + PAD
+        pygame.draw.rect(self._screen, PANEL, (cam_x, cam_y, CAM_W, MIDDLE_H), border_radius=10)
+        pygame.draw.rect(self._screen, BORDER, (cam_x, cam_y, CAM_W, MIDDLE_H), 1, border_radius=10)
 
         if self._camera_surface:
-            self._screen.blit(self._camera_surface, (RIGHT_X + (viz_w - 200) // 2, cam_y + 8))
-        else:
-            no_cam = self._fonts['sm'].render("No feed", True, (60, 60, 70))
-            self._screen.blit(no_cam, (RIGHT_X + viz_w // 2 - no_cam.get_width() // 2, cam_y + cam_h // 2 - 8))
+            cr = self._camera_surface.get_rect()
+            bx = cam_x + (CAM_W - cr.width) // 2
+            by = cam_y + (MIDDLE_H - cr.height) // 2
+            self._screen.blit(self._camera_surface, (bx, by))
 
-        # === KEY HELP (bottom) ===
-        help_y = self.H - 52
-        pygame.draw.rect(self._screen, (26, 30, 38), (10, help_y, self.W - 20, 42), border_radius=8)
-        help_color = (70, 75, 90)
-        self._screen.blit(self._fonts['xs'].render(
-            "W/S fwd/rev  A/D strafe  Q/E rotate  M auto  1/2 speed  SPACE stop  F follow  ESC quit",
-            True, help_color), (22, help_y + 6))
-        self._screen.blit(self._fonts['xs'].render(
-            "All keys combinable for omnidirectional movement  |  V4 Sonny",
-            True, (55, 60, 75)), (22, help_y + 24))
+            # Overlay detection counts on the camera panel
+            overlay_y = cam_y + MIDDLE_H - 30
+            det_parts = []
+            if self._detected_markers:
+                ids = ", ".join(str(m["id"]) for m in self._detected_markers)
+                det_parts.append(f"ArUco: [{ids}]")
+            if self._face_count:
+                det_parts.append(f"Faces: {self._face_count}")
+            if self._hand_count:
+                det_parts.append(f"Hands: {self._hand_count}")
+            if det_parts:
+                det_text = "  |  ".join(det_parts)
+                det_bg = pygame.Surface((CAM_W - 4, 26), pygame.SRCALPHA)
+                det_bg.fill((0, 0, 0, 160))
+                self._screen.blit(det_bg, (cam_x + 2, overlay_y))
+                self._screen.blit(self._fonts['sm'].render(det_text, True, (0, 255, 100)), (cam_x + 10, overlay_y + 3))
+        else:
+            no_cam = self._fonts['lg'].render("No Camera Feed", True, (50, 50, 60))
+            self._screen.blit(no_cam, (cam_x + CAM_W // 2 - no_cam.get_width() // 2,
+                                       cam_y + MIDDLE_H // 2 - 14))
+            hint = self._fonts['xs'].render("Check USB camera or run with --no-camera", True, DIM)
+            self._screen.blit(hint, (cam_x + CAM_W // 2 - hint.get_width() // 2,
+                                     cam_y + MIDDLE_H // 2 + 16))
+
+        # ============ MIDDLE RIGHT: Eyes + Sensors + Vector ============
+        right_x = cam_x + CAM_W + PAD
+        right_y = cam_y
+
+        # -- Eyes panel (top right) --
+        eye_h = int(MIDDLE_H * 0.35)
+        pygame.draw.rect(self._screen, PANEL, (right_x, right_y, RIGHT_W, eye_h), border_radius=10)
+        pygame.draw.rect(self._screen, BORDER, (right_x, right_y, RIGHT_W, eye_h), 1, border_radius=10)
+
+        if fsm and fsm.eyes:
+            eye_frame = fsm.eyes.get_frame()
+            if eye_frame:
+                try:
+                    pil_img = eye_frame.convert('L') if eye_frame.mode == '1' else eye_frame
+                    ew, eh = pil_img.size
+                    raw = pil_img.tobytes()
+                    sc = st_color
+                    rgb_data = bytearray(ew * eh * 3)
+                    for i, px in enumerate(raw):
+                        b = px / 255.0
+                        rgb_data[i*3] = int(sc[0] * b)
+                        rgb_data[i*3+1] = int(sc[1] * b)
+                        rgb_data[i*3+2] = int(sc[2] * b)
+                    esrf = pygame.image.frombuffer(bytes(rgb_data), (ew, eh), 'RGB')
+                    sf = min((RIGHT_W - 16) / ew, (eye_h - 8) / eh)
+                    scaled = pygame.transform.scale(esrf, (int(ew * sf), int(eh * sf)))
+                    self._screen.blit(scaled, (right_x + (RIGHT_W - int(ew * sf)) // 2,
+                                               right_y + (eye_h - int(eh * sf)) // 2))
+                except Exception:
+                    self._draw_simple_eyes(right_x, right_y, RIGHT_W, eye_h, state)
+            else:
+                self._draw_simple_eyes(right_x, right_y, RIGHT_W, eye_h, state)
+        else:
+            self._draw_simple_eyes(right_x, right_y, RIGHT_W, eye_h, state)
+
+        # -- IR Sensors panel --
+        ir_y = right_y + eye_h + PAD
+        ir_h = int(MIDDLE_H * 0.25)
+        pygame.draw.rect(self._screen, PANEL, (right_x, ir_y, RIGHT_W, ir_h), border_radius=10)
+        pygame.draw.rect(self._screen, BORDER, (right_x, ir_y, RIGHT_W, ir_h), 1, border_radius=10)
+        self._screen.blit(self._fonts['xs'].render("IR SENSORS", True, DIM), (right_x + 10, ir_y + 4))
+
+        sensor_names = ['W', 'NW', 'N', 'NE', 'E']
+        spacing = RIGHT_W // 6
+        for i in range(5):
+            sx = right_x + spacing * (i + 1) - 20
+            sy = ir_y + ir_h // 2 - 4
+            on = bits[i]
+            color = (0, 220, 80) if on else (42, 46, 56)
+            bc = (0, 255, 80) if on else (55, 60, 72)
+            pygame.draw.rect(self._screen, color, (sx, sy, 40, 24), border_radius=6)
+            pygame.draw.rect(self._screen, bc, (sx, sy, 40, 24), 1, border_radius=6)
+            lbl = self._fonts['xs'].render(sensor_names[i], True, (255, 255, 255) if on else (80, 80, 90))
+            self._screen.blit(lbl, (sx + 20 - lbl.get_width() // 2, sy + 4))
+
+        # Ultrasonic
+        if dist_cm > 0:
+            dc = (220, 50, 50) if dist_cm < 20 else (0, 200, 100)
+            self._screen.blit(self._fonts['sm'].render(f"Ultrasonic: {dist_cm:.0f}cm", True, dc),
+                            (right_x + 10, ir_y + ir_h - 22))
+        else:
+            self._screen.blit(self._fonts['sm'].render("Ultrasonic: not connected", True, (60, 60, 70)),
+                            (right_x + 10, ir_y + ir_h - 22))
+
+        # -- Movement vector panel --
+        vec_y = ir_y + ir_h + PAD
+        vec_h = MIDDLE_H - eye_h - ir_h - PAD * 2
+        pygame.draw.rect(self._screen, PANEL, (right_x, vec_y, RIGHT_W, vec_h), border_radius=10)
+        pygame.draw.rect(self._screen, BORDER, (right_x, vec_y, RIGHT_W, vec_h), 1, border_radius=10)
+        self._screen.blit(self._fonts['xs'].render("MOVEMENT", True, DIM), (right_x + 10, vec_y + 4))
+
+        # Vector viz
+        viz_cx = right_x + RIGHT_W // 4
+        viz_cy = vec_y + vec_h // 2 + 5
+        viz_r = min(RIGHT_W // 4 - 10, vec_h // 2 - 16)
+        if viz_r > 10:
+            for rf in [0.5, 1.0]:
+                pygame.draw.circle(self._screen, (34, 38, 48), (viz_cx, viz_cy), int(viz_r * rf), 1)
+            pygame.draw.line(self._screen, (34, 38, 48), (viz_cx - viz_r, viz_cy), (viz_cx + viz_r, viz_cy))
+            pygame.draw.line(self._screen, (34, 38, 48), (viz_cx, viz_cy - viz_r), (viz_cx, viz_cy + viz_r))
+
+            bot = 7
+            pygame.draw.rect(self._screen, (55, 60, 75), (viz_cx - bot, viz_cy - bot, bot*2, bot*2), border_radius=3)
+
+            arrow_scale = viz_r / 150
+            ax = self._anim_vy * arrow_scale
+            ay = -self._anim_vx * arrow_scale
+            if math.sqrt(ax*ax + ay*ay) > 2:
+                ac = (80, 220, 130) if self._anim_vx > 0 else (220, 80, 80) if self._anim_vx < -3 else (80, 160, 255)
+                self._draw_arrow(self._screen, ac, (viz_cx, viz_cy), (viz_cx + int(ax), viz_cy + int(ay)), 2, 8)
+
+        # Numeric readout
+        tx = right_x + RIGHT_W // 2 + 10
+        self._screen.blit(self._fonts['mono'].render(f"vx:   {debug_vx:+4d}", True, (100, 220, 130)), (tx, vec_y + 20))
+        self._screen.blit(self._fonts['mono'].render(f"vy:   {debug_vy:+4d}", True, (100, 160, 255)), (tx, vec_y + 42))
+        self._screen.blit(self._fonts['mono'].render(f"omega:{debug_omega:+4d}", True, (220, 180, 60)), (tx, vec_y + 64))
+
+        # ============ BOTTOM: Voice I/O + Gesture + Log ============
+        bot_y = HEADER_H + PAD + MIDDLE_H + PAD
+        bot_h = BOTTOM_H - PAD
+
+        # Divide bottom into 3 columns
+        col_w = (W - PAD * 4) // 3
+
+        # -- Voice Input --
+        c1x = PAD
+        pygame.draw.rect(self._screen, PANEL, (c1x, bot_y, col_w, bot_h), border_radius=10)
+        pygame.draw.rect(self._screen, BORDER, (c1x, bot_y, col_w, bot_h), 1, border_radius=10)
+        self._screen.blit(self._fonts['sm'].render("VOICE INPUT", True, DIM), (c1x + 10, bot_y + 6))
+
+        if self._voice_input and now - self._voice_input_time < 10:
+            # What was heard
+            heard = self._fonts['md'].render(f'"{self._voice_input}"', True, (0, 200, 255))
+            self._screen.blit(heard, (c1x + 10, bot_y + 30))
+            # Intent classification
+            if self._last_intent:
+                intent_color = (0, 220, 100) if self._last_confidence > 0.8 else (220, 180, 0)
+                self._screen.blit(self._fonts['sm'].render(
+                    f"Intent: {self._last_intent} ({self._last_confidence:.0%})", True, intent_color),
+                    (c1x + 10, bot_y + 58))
+        else:
+            self._screen.blit(self._fonts['sm'].render("Waiting for voice...", True, (50, 55, 65)),
+                            (c1x + 10, bot_y + 40))
+
+        # -- Voice Output + Gesture --
+        c2x = c1x + col_w + PAD
+        pygame.draw.rect(self._screen, PANEL, (c2x, bot_y, col_w, bot_h), border_radius=10)
+        pygame.draw.rect(self._screen, BORDER, (c2x, bot_y, col_w, bot_h), 1, border_radius=10)
+        self._screen.blit(self._fonts['sm'].render("OUTPUT / GESTURE", True, DIM), (c2x + 10, bot_y + 6))
+
+        if self._voice_output and now - self._voice_output_time < 8:
+            self._screen.blit(self._fonts['md'].render(f'"{self._voice_output}"', True, (100, 255, 150)),
+                            (c2x + 10, bot_y + 30))
+
+        if self._last_gesture and now - self._gesture_time < 5:
+            gesture_icon = {"fist": "✊", "open": "🖐", "thumbs_up": "👍", "peace": "✌",
+                           "point": "👆", "wave": "👋"}.get(self._last_gesture, "?")
+            self._screen.blit(self._fonts['lg'].render(
+                f"{self._last_gesture.upper()}", True, (255, 200, 50)),
+                (c2x + 10, bot_y + 60))
+
+        if self._detected_markers:
+            marker_str = "Markers: " + ", ".join(f"ID:{m['id']}" for m in self._detected_markers)
+            self._screen.blit(self._fonts['sm'].render(marker_str, True, (0, 255, 100)),
+                            (c2x + 10, bot_y + 92))
+
+        # Detection summary
+        det_y = bot_y + bot_h - 24
+        det_items = []
+        if self._face_count:
+            det_items.append(f"Faces:{self._face_count}")
+        if self._hand_count:
+            det_items.append(f"Hands:{self._hand_count}")
+        if det_items:
+            self._screen.blit(self._fonts['xs'].render("  ".join(det_items), True, (100, 180, 100)),
+                            (c2x + 10, det_y))
+
+        # -- Event Log --
+        c3x = c2x + col_w + PAD
+        c3w = W - c3x - PAD
+        pygame.draw.rect(self._screen, PANEL, (c3x, bot_y, c3w, bot_h), border_radius=10)
+        pygame.draw.rect(self._screen, BORDER, (c3x, bot_y, c3w, bot_h), 1, border_radius=10)
+        self._screen.blit(self._fonts['sm'].render("EVENT LOG", True, DIM), (c3x + 10, bot_y + 6))
+
+        log_y = bot_y + 26
+        for ts, msg in self._event_log[-7:]:
+            line = f"{ts} {msg}"
+            # Truncate if too long
+            if self._fonts['mono_sm'].size(line)[0] > c3w - 20:
+                while self._fonts['mono_sm'].size(line + "...")[0] > c3w - 20 and len(line) > 10:
+                    line = line[:-1]
+                line += "..."
+            self._screen.blit(self._fonts['mono_sm'].render(line, True, (100, 105, 120)), (c3x + 10, log_y))
+            log_y += 17
 
         pygame.display.flip()
-        self._clock.tick(60)
+        self._clock.tick(30)
         return True
 
-    def _handle_keydown(self, key):
-        """Handle key press events."""
-        from alfred.comms.protocol import cmd_vector, cmd_stop
+    def _draw_simple_eyes(self, rx, ry, rw, rh, state):
+        sc = STATE_COLORS.get(state, (120, 120, 130))
+        left_cx = rx + rw // 3
+        right_cx = rx + 2 * rw // 3
+        cy = ry + rh // 2
 
+        if state == State.SLEEPING:
+            ew, eh = 50, 8
+        elif state == State.BLOCKED:
+            ew, eh = 56, 24
+        elif state in (State.DANCING, State.PERSON_APPROACH):
+            ew, eh = 50, 42
+        else:
+            ew, eh = 46, 38
+
+        for cx in (left_cx, right_cx):
+            pygame.draw.ellipse(self._screen, sc, (cx - ew // 2, cy - eh // 2, ew, eh))
+            pr = max(5, min(ew, eh) // 5)
+            pygame.draw.ellipse(self._screen, (16, 18, 24), (cx - pr, cy - pr, pr * 2, pr * 2))
+
+    def _handle_keydown(self, key):
+        from alfred.comms.protocol import cmd_vector, cmd_stop
         fsm = self.fsm
         lf = fsm.line_follower if fsm else None
 
@@ -401,55 +596,48 @@ class DebugGUI:
                     fsm.uart.send(cmd_stop())
                 else:
                     fsm.transition(State.FOLLOWING)
-                    if lf:
-                        lf.reset()
+                    if lf: lf.reset()
+            self._log(f"Mode: {'MANUAL' if self._manual_mode else 'AUTO'}")
         elif key == pygame.K_f:
-            # Quick follow shortcut
             if fsm:
                 self._manual_mode = False
                 fsm.transition(State.FOLLOWING)
-                if lf:
-                    lf.reset()
+                if lf: lf.reset()
+            self._log("Started line following")
         elif key == pygame.K_SPACE:
             self._pressed = {k: False for k in self._pressed}
             if fsm:
                 fsm.uart.send(cmd_stop())
                 fsm.transition(State.IDLE)
             self._manual_mode = True
+            self._log("EMERGENCY STOP")
         elif key == pygame.K_ESCAPE:
             self._running = False
         elif key == pygame.K_1:
-            if lf:
-                lf.current_speed = max(10, lf.current_speed - 5)
+            if lf: lf.current_speed = max(10, lf.current_speed - 5)
             self._update_manual_movement()
         elif key == pygame.K_2:
-            if lf:
-                lf.current_speed = min(150, lf.current_speed + 5)
+            if lf: lf.current_speed = min(150, lf.current_speed + 5)
             self._update_manual_movement()
         elif key in (pygame.K_w, pygame.K_s, pygame.K_a, pygame.K_d, pygame.K_q, pygame.K_e):
-            key_map = {pygame.K_w: 'w', pygame.K_s: 's', pygame.K_a: 'a',
-                       pygame.K_d: 'd', pygame.K_q: 'q', pygame.K_e: 'e'}
-            self._pressed[key_map[key]] = True
+            km = {pygame.K_w: 'w', pygame.K_s: 's', pygame.K_a: 'a',
+                  pygame.K_d: 'd', pygame.K_q: 'q', pygame.K_e: 'e'}
+            self._pressed[km[key]] = True
             self._update_manual_movement()
 
     def _handle_keyup(self, key):
-        """Handle key release events."""
-        key_map = {pygame.K_w: 'w', pygame.K_s: 's', pygame.K_a: 'a',
-                   pygame.K_d: 'd', pygame.K_q: 'q', pygame.K_e: 'e'}
-        if key in key_map:
-            self._pressed[key_map[key]] = False
+        km = {pygame.K_w: 'w', pygame.K_s: 's', pygame.K_a: 'a',
+              pygame.K_d: 'd', pygame.K_q: 'q', pygame.K_e: 'e'}
+        if key in km:
+            self._pressed[km[key]] = False
             self._update_manual_movement()
 
     def _update_manual_movement(self):
-        """Send manual movement commands based on pressed keys."""
         if not self._manual_mode or not self.fsm:
             return
-
         from alfred.comms.protocol import cmd_vector, cmd_stop
-
         lf = self.fsm.line_follower
         speed = lf.current_speed if lf else 35
-
         vx, vy, omega = 0, 0, 0
         if self._pressed['w']: vx += speed
         if self._pressed['s']: vx -= speed
@@ -457,10 +645,8 @@ class DebugGUI:
         if self._pressed['d']: vy += speed
         if self._pressed['q']: omega -= speed
         if self._pressed['e']: omega += speed
-
         if lf:
             lf.debug_vx, lf.debug_vy, lf.debug_omega = vx, vy, omega
-
         if vx == 0 and vy == 0 and omega == 0:
             self.fsm.uart.send(cmd_stop())
         else:
@@ -468,7 +654,6 @@ class DebugGUI:
 
     @staticmethod
     def _draw_arrow(surface, color, start, end, width=2, head_size=8):
-        """Draw an arrow from start to end."""
         dx = end[0] - start[0]
         dy = end[1] - start[1]
         length = math.sqrt(dx * dx + dy * dy)

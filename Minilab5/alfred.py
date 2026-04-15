@@ -120,6 +120,133 @@ def run_voice_test():
     print("Voice test complete.")
 
 
+def _run_headless_dashboard(fsm):
+    """Run FSM with a rich terminal dashboard showing all subsystem status.
+
+    Prints a refreshing status block every 0.5s so you can monitor the robot
+    over SSH without a display.
+    """
+    from alfred.fsm.states import STATE_NAMES, State
+
+    fsm.start()
+    tick_interval = 1.0 / 30.0
+    display_interval = 0.5  # refresh terminal every 500ms
+    last_display = 0
+    last_voice_text = ""
+    last_state = None
+    event_log = []  # recent events
+
+    try:
+        while fsm._running:
+            t0 = time.monotonic()
+            fsm.tick()
+
+            # Track events
+            if fsm.state != last_state:
+                old_name = STATE_NAMES.get(last_state, "---") if last_state is not None else "---"
+                new_name = STATE_NAMES.get(fsm.state, "???")
+                event_log.append(f"  {time.strftime('%H:%M:%S')}  {old_name} -> {new_name}")
+                if len(event_log) > 8:
+                    event_log.pop(0)
+                last_state = fsm.state
+
+            if fsm.voice_listener and fsm.voice_listener.last_text != last_voice_text:
+                last_voice_text = fsm.voice_listener.last_text
+                if last_voice_text:
+                    event_log.append(f"  {time.strftime('%H:%M:%S')}  Voice: \"{last_voice_text}\"")
+                    if len(event_log) > 8:
+                        event_log.pop(0)
+
+            # Terminal display at lower rate
+            now = time.monotonic()
+            if now - last_display >= display_interval:
+                last_display = now
+                _print_dashboard(fsm, event_log)
+
+            elapsed = time.monotonic() - t0
+            sleep_time = tick_interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+    except KeyboardInterrupt:
+        print("\nInterrupted by user.")
+    finally:
+        fsm.stop()
+
+
+def _print_dashboard(fsm, event_log):
+    """Print a terminal dashboard block."""
+    from alfred.fsm.states import STATE_NAMES
+
+    state_name = STATE_NAMES.get(fsm.state, "???")
+    lf = fsm.line_follower
+    uart = fsm.uart
+
+    # Read sensor data
+    ir_bits = [0, 0, 0, 0, 0]
+    dist_cm = -1.0
+    if uart and uart.is_open:
+        ir_bits = uart.get_ir_bits()
+        dist_cm = uart.get_distance()
+
+    vx = lf.debug_vx if lf else 0
+    vy = lf.debug_vy if lf else 0
+    omega = lf.debug_omega if lf else 0
+    speed = lf.current_speed if lf else 0
+    algo_speed = lf.internal_speed if lf else 0.0
+
+    # IR sensor visual
+    sensor_labels = ['W', 'NW', ' N', 'NE', ' E']
+    ir_display = "  ".join(
+        f"\033[92m[{sensor_labels[i]}]\033[0m" if ir_bits[i] else f"\033[90m {sensor_labels[i]} \033[0m"
+        for i in range(5)
+    )
+
+    # Ultrasonic
+    if dist_cm > 0 and dist_cm < 20:
+        dist_str = f"\033[91m{dist_cm:.0f}cm BLOCKED\033[0m"
+    elif dist_cm > 0:
+        dist_str = f"\033[92m{dist_cm:.0f}cm\033[0m"
+    else:
+        dist_str = "\033[90m---\033[0m"
+
+    # Voice
+    voice_text = ""
+    lang = "EN"
+    if fsm.voice_listener:
+        voice_text = fsm.voice_listener.last_text or ""
+        lang = fsm.voice_listener.language.upper()
+
+    # Face count
+    face_count = len(fsm._last_faces) if fsm._last_faces else 0
+
+    # Clear and print
+    print("\033[2J\033[H", end="")  # clear screen, cursor to top
+    print("=" * 60)
+    print(f"  \033[96mSONNY V4\033[0m — Project Alfred    {time.strftime('%H:%M:%S')}")
+    print("=" * 60)
+    print()
+    print(f"  State:    \033[93m{state_name:12s}\033[0m     Speed: {speed}")
+    print(f"  Language: {lang}                  Algo:  {algo_speed:.1f}")
+    print()
+    print(f"  ┌─ IR Sensors ──────────────────────────────┐")
+    print(f"  │  {ir_display}  │")
+    print(f"  └─────────────────────────────────────────────┘")
+    print()
+    print(f"  Ultrasonic:  {dist_str}")
+    print(f"  Movement:    vx:{vx:+4d}   vy:{vy:+4d}   omega:{omega:+4d}")
+    print(f"  Faces:       {face_count}    Voice: \"{voice_text}\"")
+    print()
+    print(f"  ┌─ Event Log ──────────────────────────────────┐")
+    for e in event_log[-6:]:
+        print(f"  │{e:50s}│")
+    remaining = 6 - len(event_log[-6:])
+    for _ in range(remaining):
+        print(f"  │{' ':50s}│")
+    print(f"  └──────────────────────────────────────────────┘")
+    print()
+    print(f"  \033[90mCtrl+C to quit\033[0m")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sonny V4 — Alfred Robotic Butler")
     parser.add_argument("--headless", action="store_true", help="Run without GUI")
@@ -184,8 +311,8 @@ def main():
             gui.stop()
             fsm.stop()
     else:
-        # Headless mode
-        fsm.run()
+        # Headless mode with rich terminal dashboard
+        _run_headless_dashboard(fsm)
 
 
 if __name__ == "__main__":

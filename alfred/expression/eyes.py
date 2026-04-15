@@ -137,11 +137,9 @@ class EyeController:
             rnd = min(shape["round"], ew // 2, eh // 2)
             draw.rounded_rectangle([x0, y0, x1, y1], radius=rnd, fill=1)
 
-            # Pupil
+            # Pupil — drawn at eye center (gaze already applied to cx, cy)
             pupil_r = max(2, min(ew, eh) // 6)
-            px = cx + gaze_x
-            py = cy + gaze_y
-            draw.ellipse([px - pupil_r, py - pupil_r, px + pupil_r, py + pupil_r], fill=0)
+            draw.ellipse([cx - pupil_r, cy - pupil_r, cx + pupil_r, cy + pupil_r], fill=0)
 
             # Eyebrow
             if brow_off != 0:

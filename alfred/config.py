@@ -77,6 +77,7 @@ class VoiceConfig:
     vosk_model_path: str = ""  # auto-detect if empty
     piper_voice: str = "en_US-lessac-medium"
     listen_timeout: float = 5.0
+    language: str = "en"  # "en" or "tr"
 
 
 @dataclass(frozen=True)

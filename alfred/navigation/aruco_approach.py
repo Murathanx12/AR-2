@@ -4,9 +4,12 @@ Supports two modes:
 1. Calibrated: Uses pose estimation tvec/rvec for precise distance control.
 2. Visual-only: Uses marker pixel size and center for distance/steering
    (like minilab6.py). Works without camera calibration.
+
+Improved: simultaneous steer+drive, smooth speed ramp, temporal filtering.
 """
 
 import math
+import time
 import logging
 
 logger = logging.getLogger(__name__)
@@ -17,10 +20,11 @@ class ArucoApproach:
 
     Visual-only mode uses marker pixel size to estimate distance.
     When the marker pixel size exceeds stop_size, the robot has arrived.
+    Uses simultaneous steering + forward motion for smooth approach.
     """
 
     def __init__(self, arrival_distance=0.05,
-                 stop_size=150, center_tol_frac=0.10,
+                 stop_size=150, center_tol_frac=0.05,
                  kp_forward=200.0, kp_lateral=120.0, kp_rotation=80.0):
         """
         Args:
@@ -38,6 +42,12 @@ class ArucoApproach:
         self._kp_lateral = kp_lateral
         self._kp_rotation = kp_rotation
         self._last_distance = None
+
+        # Temporal smoothing for visual approach
+        self._smooth_cx = None
+        self._smooth_size = None
+        self._alpha = 0.4  # EMA smoothing factor (0=no update, 1=instant)
+        self._approach_start_time = None
 
     # --- Calibrated approach (when camera is calibrated) ---
 
@@ -86,8 +96,8 @@ class ArucoApproach:
                                 approach_speed=50, turn_speed=45):
         """Compute motor command using pixel-based marker tracking.
 
-        Uses marker center for steering and marker pixel size for distance.
-        Based on the proven minilab6.py approach logic.
+        Uses simultaneous steering + forward motion for smoother approach.
+        Applies exponential moving average to reduce jitter from frame noise.
 
         Args:
             marker: Dict with "center" (cx, cy) and "size" (pixels).
@@ -100,42 +110,62 @@ class ArucoApproach:
             Tuple (vx, vy, omega) as ints.
             Returns None if arrived (marker size > stop_size).
         """
-        cx, cy = marker["center"]
-        size = marker["size"]
+        raw_cx, raw_cy = marker["center"]
+        raw_size = marker["size"]
+
+        # Temporal smoothing (EMA filter)
+        if self._smooth_cx is None:
+            self._smooth_cx = raw_cx
+            self._smooth_size = raw_size
+            self._approach_start_time = time.monotonic()
+        else:
+            self._smooth_cx += self._alpha * (raw_cx - self._smooth_cx)
+            self._smooth_size += self._alpha * (raw_size - self._smooth_size)
+
+        cx = self._smooth_cx
+        size = self._smooth_size
 
         # Close enough — arrived
         if size > self._stop_size:
+            self._reset_smoothing()
             return None  # signal arrived
 
-        # Center tolerance
+        # Compute steering (proportional to horizontal offset)
         cx_img = frame_width / 2.0
         error_x = cx - cx_img
-        center_tolerance = frame_width * self._center_tol_frac
+        normalized_error = error_x / (frame_width / 2.0)  # -1 to +1
 
-        # If horizontally off-center, turn first
-        if abs(error_x) > center_tolerance:
-            # Proportional turn speed
-            turn = int(turn_speed * (error_x / (frame_width / 2.0)))
-            turn = max(-turn_speed, min(turn_speed, turn))
-            return (0, 0, turn)
+        omega = int(turn_speed * normalized_error)
+        omega = max(-turn_speed, min(turn_speed, omega))
 
-        # Centered — drive forward. Slow down as marker gets bigger.
-        # size ratio: small marker = far away = faster
+        # Compute forward speed (proportional to distance estimate)
+        # Slow down as marker gets bigger (closer)
         size_ratio = min(1.0, size / self._stop_size)
-        speed = max(15, int(approach_speed * (1.0 - size_ratio * 0.6)))
 
-        return (speed, 0, 0)
+        # Reduce forward speed when steering hard (prevents overshooting)
+        steer_factor = 1.0 - 0.5 * abs(normalized_error)
+        speed = max(12, int(approach_speed * (1.0 - size_ratio * 0.6) * steer_factor))
+
+        # Very close: creep speed for precise stopping
+        if size_ratio > 0.8:
+            speed = min(speed, 18)
+
+        return (speed, 0, omega)
 
     def is_visual_arrived(self, marker):
-        """Check if arrived at marker (visual-only mode).
-
-        Args:
-            marker: Dict with "size" key (pixel size).
-
-        Returns:
-            True if marker pixel size exceeds stop threshold.
-        """
+        """Check if arrived at marker (visual-only mode)."""
         return marker["size"] > self._stop_size
+
+    def _reset_smoothing(self):
+        """Reset temporal smoothing state."""
+        self._smooth_cx = None
+        self._smooth_size = None
+        self._approach_start_time = None
+
+    def reset(self):
+        """Reset approach state for a new target."""
+        self._reset_smoothing()
+        self._last_distance = None
 
     @property
     def last_distance(self):

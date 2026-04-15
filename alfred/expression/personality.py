@@ -1,5 +1,6 @@
 """Personality engine — coordinates eyes, LEDs, head, and speaker by FSM state."""
 
+import time
 import logging
 
 logger = logging.getLogger(__name__)
@@ -13,10 +14,10 @@ STATE_EXPRESSIONS = {
     "ENDPOINT":    {"emotion": "surprised", "led": "following",   "head": "center"},
     "PARKING":     {"emotion": "happy",     "led": "parking",     "head": "center"},
     "ARUCO_SRCH":  {"emotion": "confused",  "led": "searching",   "head": "center"},
-    "ARUCO_APPR":  {"emotion": "neutral",   "led": "approaching", "head": "center"},
+    "ARUCO_APPR":  {"emotion": "neutral",   "led": "approaching", "head": "track"},
     "BLOCKED":     {"emotion": "angry",     "led": "blocked",     "head": "center"},
     "REROUTE":     {"emotion": "confused",  "led": "searching",   "head": "center"},
-    "PATROL":      {"emotion": "happy",     "led": "idle",        "head": "center"},
+    "PATROL":      {"emotion": "happy",     "led": "idle",        "head": "track"},
     "PERSON":      {"emotion": "happy",     "led": "approaching", "head": "track"},
     "DANCE":       {"emotion": "love",      "led": "dancing",     "head": "center"},
     "PHOTO":       {"emotion": "happy",     "led": "idle",        "head": "center"},
@@ -30,8 +31,9 @@ STATE_EXPRESSIONS = {
 class PersonalityEngine:
     """Coordinates eyes, LEDs, head servo, and speaker to express robot state.
 
-    Called each FSM tick to update all expression subsystems based on the
-    current state and context (e.g., detected faces for gaze tracking).
+    Only updates expression subsystems on state transitions or when tracking
+    data changes (e.g., new face detected). This avoids wasting cycles on
+    redundant renders every tick.
     """
 
     def __init__(self, eyes=None, leds=None, head=None, speaker=None):
@@ -47,60 +49,68 @@ class PersonalityEngine:
         self._head = head
         self._speaker = speaker
         self._last_state = None
-        self._spoken_states = set()  # track which states we've already announced
+        self._last_face_center = None
+        self._last_eye_update = 0.0
+        self._eye_update_interval = 0.1  # update eyes at 10Hz max (not 30Hz)
 
     def update(self, fsm_state, context=None):
         """Update all expression subsystems for the current FSM state.
+
+        Only triggers full updates on state transitions. Eye gaze and head
+        tracking update at a lower rate (10Hz) to avoid OLED/I2C bottleneck.
 
         Args:
             fsm_state: State name string (from STATE_NAMES).
             context: Optional dict with extra info, e.g.:
                      - "faces": list of detected faces for gaze tracking
                      - "speak": bool, whether to announce state change
-                     - "person_center": (x, y) for head tracking
         """
         context = context or {}
+        now = time.monotonic()
+        state_changed = fsm_state != self._last_state
         expr = STATE_EXPRESSIONS.get(fsm_state, STATE_EXPRESSIONS["IDLE"])
 
-        # Update eyes
-        if self._eyes:
-            self._eyes.set_emotion(expr["emotion"])
+        # On state change: update LEDs and emotion immediately
+        if state_changed:
+            if self._eyes:
+                self._eyes.set_emotion(expr["emotion"])
+            if self._leds:
+                self._leds.set_state(expr["led"])
 
-            # Gaze tracking: look at detected person
-            faces = context.get("faces")
-            if faces:
-                face = faces[0]
-                cx, cy = face.get("center", (0.5, 0.5))
-                # Normalize to 0-1 range
-                frame_w = context.get("frame_width", 640)
-                frame_h = context.get("frame_height", 480)
-                self._eyes.look_at(cx / frame_w, cy / frame_h)
-            else:
-                self._eyes.look_at(0.5, 0.5)  # look forward
+        # Update eyes + head at reduced rate (10Hz) to avoid I2C bottleneck
+        if now - self._last_eye_update >= self._eye_update_interval:
+            self._last_eye_update = now
 
-            self._eyes.update()
+            if self._eyes:
+                # Gaze tracking: look at detected person
+                faces = context.get("faces")
+                if faces:
+                    face = faces[0]
+                    cx, cy = face.get("center", (0.5, 0.5))
+                    frame_w = context.get("frame_width", 640)
+                    frame_h = context.get("frame_height", 480)
+                    self._eyes.look_at(cx / frame_w, cy / frame_h)
+                    self._last_face_center = (cx, cy)
+                else:
+                    self._eyes.look_at(0.5, 0.5)
+                    self._last_face_center = None
+                self._eyes.update()
 
-        # Update LEDs
-        if self._leds:
-            self._leds.set_state(expr["led"])
+            # Update head tracking
+            if self._head:
+                if expr["head"] == "track" and context.get("faces"):
+                    self._head.look_at_person(context["faces"][0])
+                elif expr["head"] == "center":
+                    self._head.center()
 
-        # Update head
-        if self._head:
-            if expr["head"] == "track" and context.get("faces"):
-                self._head.look_at_person(context["faces"][0])
-            elif expr["head"] == "center":
-                self._head.center()
-
-        # Announce state changes via speaker
-        state_changed = fsm_state != self._last_state
+        # Announce state changes via speaker (only on transition)
         if state_changed and self._speaker and context.get("speak", True):
             self._announce_state(fsm_state)
 
         self._last_state = fsm_state
 
     def _announce_state(self, state):
-        """Speak a phrase for the new state (only first time per state visit)."""
-        # Map FSM states to speaker phrases
+        """Speak a phrase for the new state."""
         announce_map = {
             "FOLLOW":     "follow",
             "STOPPING":   "stop",
