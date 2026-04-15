@@ -1,12 +1,11 @@
 """Voice listener — wake-word detection and speech-to-text using VOSK.
 
-Simple design:
-1. Say "Hello Sonny" once to wake up
-2. Robot stays awake — every sentence after that is treated as a command
-3. Say "stop" at any time to stop
-4. Say "sleep" or "go to sleep" to put back in sleep mode (requires wake again)
-
-Uses open VOSK recognition (no grammar constraint) for maximum flexibility.
+Design:
+1. "Hello Sonny" / "hello sunny" / "hello sony" / etc all wake up
+2. Just "hello" alone triggers "Are you talking to me?" confirmation
+3. Once awake, stays awake — every sentence is a command
+4. "stop" always works, even before wake
+5. "sleep" puts back to sleep
 """
 
 import threading
@@ -22,36 +21,42 @@ try:
     _HAS_PYAUDIO = True
 except (ImportError, OSError):
     _HAS_PYAUDIO = False
-    logger.warning("pyaudio not available — voice listener disabled")
 
 try:
     from vosk import Model, KaldiRecognizer
     _HAS_VOSK = True
 except ImportError:
     _HAS_VOSK = False
-    logger.warning("vosk not available — voice listener disabled")
+
+
+# All variations VOSK might hear when you say "Hello Sonny"
+WAKE_EXACT = {
+    "hello sonny", "hello sunny", "hello sony", "hello son",
+    "hallo sonny", "hallo sunny", "halo sonny", "halo sunny",
+    "hey sonny", "hey sunny", "hey sony",
+    "hi sonny", "hi sunny", "hi sony",
+}
+
+# Partial wake — just "hello" or "hey" alone, needs confirmation
+WAKE_MAYBE = {"hello", "hallo", "halo", "hey", "hi"}
 
 
 class VoiceListener:
-    """Listens for wake word and commands using VOSK offline STT.
-
-    After wake word is detected once, stays awake and treats every
-    recognized sentence as a command. No need to say wake word again.
-    """
+    """VOSK-based voice listener with forgiving wake word detection."""
 
     SAMPLE_RATE = 16000
-    CHUNK_SIZE = 4000  # ~250ms at 16kHz
+    CHUNK_SIZE = 4000
 
     def __init__(self, wake_phrase="hello sonny", model_path=None):
-        self._wake_phrase = wake_phrase.lower().strip()
         self._model_path = model_path
         self._running = False
         self._callback = None
         self._thread = None
 
         self._lock = threading.Lock()
-        self._awake = False          # True after wake word heard
-        self._wake_detected = False  # consumed by FSM on first wake
+        self._awake = False
+        self._wake_detected = False
+        self._waiting_confirm = False   # waiting for yes/no after "hello"
         self._last_text = ""
 
     @property
@@ -65,7 +70,6 @@ class VoiceListener:
         self._running = True
         self._thread = threading.Thread(target=self._listen_loop, daemon=True)
         self._thread.start()
-        logger.info("Voice listener started")
 
     def stop(self):
         self._running = False
@@ -73,37 +77,39 @@ class VoiceListener:
             self._thread.join(timeout=5.0)
 
     def on_speech(self, callback):
-        """Register callback: callback(text) called for every command."""
         self._callback = callback
 
     def is_wake_word_detected(self):
-        """Check and consume wake word flag (for FSM IDLE->LISTENING)."""
         with self._lock:
-            detected = self._wake_detected
+            d = self._wake_detected
             self._wake_detected = False
-        return detected
+        return d
 
     def put_to_sleep(self):
-        """Put listener back to sleep — requires wake word again."""
         with self._lock:
             self._awake = False
-        logger.info("Voice listener sleeping — say wake phrase to wake")
+            self._waiting_confirm = False
 
     @property
     def last_text(self):
         with self._lock:
             return self._last_text
 
+    @property
+    def is_awake(self):
+        with self._lock:
+            return self._awake
+
+    @property
+    def is_waiting_confirm(self):
+        with self._lock:
+            return self._waiting_confirm
+
     def _find_model(self):
-        """Find VOSK model directory."""
         if self._model_path and os.path.isdir(self._model_path):
             return self._model_path
-
-        model_names = [
-            "vosk-model-small-en-us-0.15",
-            "vosk-model-en-us-0.22-lgraph",
-        ]
-        search_dirs = [
+        names = ["vosk-model-small-en-us-0.15", "vosk-model-en-us-0.22-lgraph"]
+        dirs = [
             os.getcwd(),
             os.path.expanduser("~/AR-2"),
             os.path.expanduser("~/coursework/minilab6"),
@@ -112,11 +118,11 @@ class VoiceListener:
             os.path.join(os.path.dirname(__file__), "..", ".."),
             os.path.expanduser("~"),
         ]
-        for name in model_names:
-            for d in search_dirs:
-                path = os.path.join(d, name)
-                if os.path.isdir(path) and len(os.listdir(path)) >= 2:
-                    return path
+        for n in names:
+            for d in dirs:
+                p = os.path.join(d, n)
+                if os.path.isdir(p) and len(os.listdir(p)) >= 2:
+                    return p
         return None
 
     def _listen_loop(self):
@@ -126,7 +132,6 @@ class VoiceListener:
             return
 
         try:
-            logger.info(f"Loading VOSK model from {model_path}")
             model = Model(model_path)
         except Exception as e:
             logger.error(f"Failed to load VOSK model: {e}")
@@ -144,9 +149,9 @@ class VoiceListener:
             p.terminate()
             return
 
-        # Open recognition — no grammar constraint for maximum flexibility
+        # Open recognition — no grammar constraint
         rec = KaldiRecognizer(model, self.SAMPLE_RATE)
-        logger.info(f"Voice ready. Say '{self._wake_phrase}' to wake up.")
+        logger.info("Voice ready. Say 'Hello Sonny' to wake up.")
 
         while self._running:
             try:
@@ -163,29 +168,8 @@ class VoiceListener:
                     with self._lock:
                         self._last_text = text
 
-                    logger.info(f"[Voice] Heard: '{text}'")
-
-                    # "stop" always works, even before wake
-                    if self._is_stop_command(text):
-                        if self._callback:
-                            self._callback("stop")
-                        continue
-
-                    # Check for wake phrase
-                    if not self._awake:
-                        if self._wake_phrase in text:
-                            with self._lock:
-                                self._awake = True
-                                self._wake_detected = True
-                            logger.info("AWAKE — now listening for commands")
-                            # Check if command was said in same sentence
-                            after = text.split(self._wake_phrase, 1)[-1].strip()
-                            if after and self._callback:
-                                self._callback(after)
-                    else:
-                        # Already awake — everything is a command
-                        if self._callback:
-                            self._callback(text)
+                    logger.info(f"[Voice] '{text}'")
+                    self._process(text)
 
             except Exception as e:
                 logger.error(f"Voice error: {e}")
@@ -195,9 +179,59 @@ class VoiceListener:
         stream.close()
         p.terminate()
 
-    @staticmethod
-    def _is_stop_command(text):
-        """Check if text is a stop command — works even before wake."""
-        stop_words = {"stop", "halt", "freeze"}
+    def _process(self, text):
         words = set(text.split())
-        return bool(words & stop_words)
+
+        # "stop" always works
+        if words & {"stop", "halt", "freeze"}:
+            if self._callback:
+                self._callback("stop")
+            return
+
+        # Waiting for yes/no confirmation after bare "hello"
+        if self._waiting_confirm:
+            with self._lock:
+                self._waiting_confirm = False
+            if words & {"yes", "yeah", "yep", "sure", "okay", "ok", "yea"}:
+                self._do_wake(text)
+            elif words & {"no", "nope", "nah", "cancel"}:
+                logger.info("Not talking to Sonny, going back to sleep")
+            else:
+                # Ambiguous — treat as yes if awake context makes sense
+                # but don't wake if they said something random
+                logger.info(f"Unclear confirmation: '{text}', ignoring")
+            return
+
+        # Already awake — everything is a command
+        if self._awake:
+            if self._callback:
+                self._callback(text)
+            return
+
+        # Not awake — check for wake word
+        # Check exact matches first (hello sonny, hello sunny, etc)
+        for wake in WAKE_EXACT:
+            if wake in text:
+                # Extract command after wake phrase if any
+                after = text.split(wake, 1)[-1].strip()
+                self._do_wake(after)
+                return
+
+        # Check partial wake — just "hello" alone
+        stripped_words = words - {"[unk]", "the", "a", "to", "is", "it"}
+        if stripped_words and stripped_words.issubset(WAKE_MAYBE):
+            # They just said "hello" or "hey" — ask for confirmation
+            with self._lock:
+                self._waiting_confirm = True
+            if self._callback:
+                self._callback("__confirm_wake__")
+            return
+
+    def _do_wake(self, command_after=""):
+        with self._lock:
+            self._awake = True
+            self._wake_detected = True
+            self._waiting_confirm = False
+        logger.info("AWAKE")
+        if command_after and self._callback:
+            self._callback(command_after)
