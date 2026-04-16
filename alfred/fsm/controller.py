@@ -212,7 +212,7 @@ class AlfredFSM:
         self._dance_start = None
         self._dance_duration = 5.0
         self._photo_taken = False
-        self._aruco_target_id = 8  # default marker ID (our assigned ID)
+        self._aruco_target_id = None  # None = follow any marker, int = specific ID
         self._last_aruco_pose = None
         self._last_frame = None
         self._last_faces = []
@@ -445,7 +445,7 @@ class AlfredFSM:
                 if marker_id is not None:
                     msg = f"Searching for marker {marker_id}."
                 else:
-                    msg = "Searching for marker 8."
+                    msg = "Searching for any marker."
             else:
                 msg = confirmations.get(intent, "Got it.")
             if self.speaker:
@@ -464,10 +464,10 @@ class AlfredFSM:
                 marker_id = self.intent_classifier.extract_marker_id(text)
                 if marker_id is not None:
                     self._aruco_target_id = marker_id
-                    print(f"[ArUco] Target marker set to ID {marker_id}")
+                    print(f"[ArUco] Target set to marker ID {marker_id}")
                 else:
-                    self._aruco_target_id = 8  # default: our assigned ID
-                    print(f"[ArUco] Using default marker ID 8")
+                    self._aruco_target_id = None  # follow any marker
+                    print(f"[ArUco] Following any visible marker")
                 if self.aruco_approach:
                     self.aruco_approach.reset()
             self.transition(target)
@@ -538,10 +538,9 @@ class AlfredFSM:
     def _tick_aruco_search(self):
         """Scan for ArUco markers by rotating slowly.
 
-        If a target ID is set, only approach that specific marker.
-        If no target ID, approach the first marker found.
+        If target_id is set (e.g. "go to marker 42"): only approach that ID.
+        If target_id is None (e.g. "go to qr code"): approach nearest/largest marker.
         """
-        # R4: Check ultrasonic obstacle while searching
         if self._check_ultrasonic_obstacle():
             self.transition(State.BLOCKED)
             return
@@ -549,35 +548,34 @@ class AlfredFSM:
         if self.aruco_detector and self._last_frame is not None:
             markers = self.aruco_detector.detect(self._last_frame)
             if markers:
-                # Look for our specific target marker
                 target = None
+
                 if self._aruco_target_id is not None:
+                    # Looking for specific ID
                     for m in markers:
                         if m["id"] == self._aruco_target_id:
                             target = m
                             break
                     if target is None:
-                        # See markers but not our target — keep searching
-                        # Show what we see for debugging
-                        seen_ids = [m["id"] for m in markers]
-                        print(f"[ArUco] See IDs {seen_ids}, looking for {self._aruco_target_id}")
+                        seen = [m["id"] for m in markers]
+                        print(f"[ArUco] See {seen}, want {self._aruco_target_id}")
                 else:
-                    # No specific target — take the first one
-                    target = markers[0]
+                    # No specific target — approach the largest (closest) marker
+                    target = max(markers, key=lambda m: m["size"])
                     self._aruco_target_id = target["id"]
 
                 if target:
-                    print(f"[ArUco] Found target marker ID {self._aruco_target_id}!")
+                    print(f"[ArUco] Found marker {target['id']}! size={target['size']:.0f}px")
                     if self.speaker:
-                        self.speaker.say(f"Found marker {self._aruco_target_id}. Approaching.")
+                        self.speaker.say(f"Found marker {target['id']}. Approaching.")
                     self.transition(State.ARUCO_APPROACH)
                     return
 
-        # Slow rotation to scan for markers
-        self.uart.send(cmd_vector(0, 0, 30))
+        # Slow rotation to scan — speed 15 (was 30, too fast)
+        self.uart.send(cmd_vector(0, 0, 15))
         self.line_follower.debug_vx = 0
         self.line_follower.debug_vy = 0
-        self.line_follower.debug_omega = 30
+        self.line_follower.debug_omega = 15
 
     def _tick_aruco_approach(self):
         """Drive toward detected ArUco marker using visual approach (R3)."""

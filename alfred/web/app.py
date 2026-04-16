@@ -171,7 +171,7 @@ font-size:11px;color:#484f58;gap:20px}
 <button class="btn" onclick="cmd('follow track')">Follow Track</button>
 <button class="btn" onclick="cmd('follow the marker')">Follow Marker</button>
 <button class="btn" onclick="cmd('go to marker 8')">Marker 8</button>
-<button class="btn" onclick="cmd('go to marker 42')">Marker 42</button>
+<button class="btn" onclick="var id=document.getElementById('mkrId').value;cmd('go to marker '+id)">Go to ID:<input id="mkrId" type="number" value="42" min="0" max="49" style="width:36px;background:#161b22;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;text-align:center" onclick="event.stopPropagation()"></button>
 <button class="btn" onclick="cmd('dance')">Dance</button>
 <button class="btn" onclick="cmd('patrol')">Patrol</button>
 <button class="btn" onclick="cmd('photo')">Photo</button>

@@ -97,7 +97,7 @@ class DebugGUI:
     └──────────────────────────────────────────────┘
     """
 
-    def __init__(self, fsm=None, width=1280, height=720):
+    def __init__(self, fsm=None, width=900, height=600):
         if not _HAS_PYGAME:
             raise RuntimeError("pygame is required for GUI")
 
@@ -135,20 +135,8 @@ class DebugGUI:
     def start(self):
         pygame.init()
         # Go fullscreen on the available display
-        try:
-            info = pygame.display.Info()
-            self.W = info.current_w
-            self.H = info.current_h
-            if self.W > 0 and self.H > 0:
-                self._screen = pygame.display.set_mode((self.W, self.H), pygame.FULLSCREEN)
-            else:
-                self.W, self.H = 1280, 720
-                self._screen = pygame.display.set_mode((self.W, self.H))
-        except Exception:
-            self.W, self.H = 1280, 720
-            self._screen = pygame.display.set_mode((self.W, self.H))
+        self._screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
         pygame.display.set_caption("SONNY — Project Alfred Dashboard")
-        pygame.mouse.set_visible(False)
         self._clock = pygame.time.Clock()
 
         ui_fonts = ["ubuntu", "dejavusans", "segoeui", "freesans", "arial"]
