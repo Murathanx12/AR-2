@@ -254,6 +254,8 @@ def main():
     parser.add_argument("--no-camera", action="store_true", help="Skip camera subsystem")
     parser.add_argument("--no-web", action="store_true", help="Skip phone web controller")
     parser.add_argument("--web-port", type=int, default=8080, help="Phone web controller port")
+    parser.add_argument("--local-display", action="store_true",
+                        help="Show GUI on Pi's own monitor (HDMI) instead of X11")
     parser.add_argument("--test-vision", action="store_true", help="Run vision test and exit")
     parser.add_argument("--test-voice", action="store_true", help="Run voice test and exit")
     parser.add_argument("--speed", type=int, default=CONFIG.speed.default_speed,
@@ -289,6 +291,11 @@ def main():
             web.start()
         except Exception as e:
             print(f"[Web] Failed to start: {e} (install flask: pip install flask)")
+
+    # Force GUI to Pi's HDMI monitor if requested
+    if args.local_display:
+        os.environ["DISPLAY"] = ":0"
+        print("[GUI] Displaying on Pi's HDMI monitor")
 
     # GUI mode
     gui = None

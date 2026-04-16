@@ -92,10 +92,10 @@ class VoiceListener:
 
     SAMPLE_RATE = 16000
     CHUNK_SIZE = 1024         # ~64ms per chunk at 16kHz
-    SILENCE_THRESHOLD = 500   # RMS energy below this = silence
-    SILENCE_DURATION = 0.8    # seconds of silence to end utterance
+    SILENCE_THRESHOLD = 800   # RMS energy below this = silence (raised to ignore background chat)
+    SILENCE_DURATION = 0.6    # seconds of silence to end utterance (faster response)
     MIN_SPEECH_DURATION = 0.3 # minimum speech to process (ignore clicks/noise)
-    MAX_SPEECH_DURATION = 10  # max seconds per utterance
+    MAX_SPEECH_DURATION = 5   # max 5 seconds per utterance (commands are short)
 
     def __init__(self, wake_phrase="hello sonny", model_path=None):
         self._model_path = model_path
@@ -384,8 +384,16 @@ class VoiceListener:
             return
 
         # Filter out whisper hallucinations (common on silence)
-        junk = {"you", "thank you", "thanks for watching", "bye", "...", ""}
-        if text in junk:
+        junk = {"you", "thank you", "thanks for watching", "bye", "...", "",
+                "thank you.", "thanks.", "you.", "bye."}
+        if text.rstrip(".!,") in junk or text in junk:
+            return
+
+        # Filter out long sentences — commands are max ~6 words
+        # Background conversation like "i was taking all three by the next one" is not a command
+        word_count = len(text.split())
+        if word_count > 8:
+            logger.debug(f"[Voice] Ignored (too long, {word_count} words): '{text}'")
             return
 
         with self._lock:
