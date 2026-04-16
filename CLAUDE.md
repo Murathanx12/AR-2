@@ -3,9 +3,9 @@ Sonny (Alfred V4) — Mecanum-wheeled robotic butler for HKU School of Innovatio
 Demo: April 24, 2026. Repo: https://github.com/Murathanx12/AR-2
 Wake phrase: "Hello Sonny" (say once, stays awake until "sleep")
 
-Known Issues (Apr 15, 2026)
+Known Issues (Apr 16, 2026)
 
-1. ESP32 motors not responding — UART connects but motors don't spin. Suspected hardware (wiring/short/battery). Run scripts/test_esp32.py to diagnose.
+1. ESP32 motors not responding — UART works (confirmed), ESP32 receives commands, but motors don't spin. Suspected: 12V battery dead or motor driver board issue. NOT a software problem.
 2. Voice recognition — upgraded to Whisper tiny (primary) with VOSK fallback. Install: pip install faster-whisper. Phone app on port 8080 as backup.
 3. USB microphone weak — only picks up from ~30cm. Need conference mic or phone relay for demo.
 4. Obstacle detection disabled — camera-based detection had too many false positives. Only ultrasonic (when connected) triggers BLOCKED state.
