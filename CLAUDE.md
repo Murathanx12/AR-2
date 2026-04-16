@@ -5,7 +5,7 @@ Wake phrase: "Hello Sonny" (say once, stays awake until "sleep")
 
 Known Issues (Apr 16, 2026)
 
-1. ESP32 motors not responding — UART works (confirmed), ESP32 receives commands, but motors don't spin. Suspected: 12V battery dead or motor driver board issue. NOT a software problem.
+1. ESP32 motors not responding — UART connects but motors don't spin. Suspected hardware (wiring/short/battery). Run scripts/test_esp32.py to diagnose.
 2. Voice recognition — upgraded to Whisper tiny (primary) with VOSK fallback. Install: pip install faster-whisper. Phone app on port 8080 as backup.
 3. USB microphone weak — only picks up from ~30cm. Need conference mic or phone relay for demo.
 4. Obstacle detection disabled — camera-based detection had too many false positives. Only ultrasonic (when connected) triggers BLOCKED state.
@@ -15,8 +15,7 @@ Architecture
 ESP32-S3: Motor PWM + 5x IR sensor reading at 20Hz + HC-SR04 ultrasonic at 10Hz + NeoPixel LEDs + buzzer. Firmware: esp32/src/main.cpp (PlatformIO).
 Raspberry Pi 5: Decision engine. Python. FSM + vision + voice + expression.
 14" Type-C monitor: Robot face (OLED eyes) + camera feed + status GUI via Pygame.
-UART: 115200 baud on /dev/ttyAMA2 (Pi GPIO4=TX pin7, GPIO5=RX pin29). Pi sends mv_vector:vx,vy,omega\n, ESP sends IR_STATUS:XX\n and DIST:XX.X\n.
-IMPORTANT: Pi UART2 pins are GPIO4 (pin 7) and GPIO5 (pin 29), NOT GPIO14/GPIO15 (pins 8/10). Per INTC1002 Tutorial 3.
+UART: 115200 baud on /dev/ttyAMA2. Pi sends mv_vector:vx,vy,omega\n, ESP sends IR_STATUS:XX\n and DIST:XX.X\n.
 Mecanum IK: FL=vx+vy+omega, FR=vx-vy-omega, RL=vx-vy+omega, RR=vx+vy-omega. PWM 50-200 from 0-100%.
 Wiring: See docs/WIRING.md for complete pin map.
 
@@ -52,8 +51,6 @@ Competition Requirements (Minilab 6 / Project Alfred)
 R1: Voice commands — wake phrase "Hello Sonny", FOLLOW TRACK, GO TO QR CODE. VOSK STT + exact keyword matching. ✅ (code done, accuracy needs improvement)
 R2: Line-following delivery. IR sensors + weighted algorithmic control. ✅ (code done, needs ESP32 hardware fix)
 R3: ArUco marker approach. Visual-only with EMA smoothing + simultaneous steer/drive. ✅ (code done, needs ESP32)
-    Our assigned marker ID is 8. Robot can also target specific IDs via voice: "go to marker 42"
-    EC5 bonus: can switch targets mid-task ("now go to marker 18")
 R4: Obstacle detection — ultrasonic HC-SR04 only (camera detection disabled — too many false positives). ✅ (code done, needs ultrasonic wired)
 R5: Intention indicators — NeoPixel LEDs per state, TTS (espeak-ng), buzzer, OLED eyes, 14" screen GUI. ✅
 EC1: Gesture recognition — MediaPipe hands, 6 gestures, gesture→action in patrol. ✅
@@ -102,6 +99,7 @@ alfred/voice/ — listener.py (Whisper tiny primary + VOSK fallback, VAD, wake-o
 alfred/expression/ — eyes.py (8 emotions, gaze, auto-blink), leds.py (NeoPixel), head.py (PCA9685 servo), personality.py (state→expression, 10Hz).
 alfred/fsm/ — states.py (17-state IntEnum), controller.py (30Hz dispatch).
 alfred/gui/ — debug_gui.py (1280x720 Pygame: eyes, camera+overlays, IR, vector, voice I/O, gestures, event log).
+alfred/web/ — app.py (Flask dashboard: live camera MJPEG, all sensors, voice I/O, manual drive, command buttons, event log).
 alfred/utils/ — logging (colored), timing (RateTimer, Stopwatch).
 
 Key Commands
