@@ -99,6 +99,16 @@ font-size:12px;cursor:pointer;text-align:center;transition:all 0.1s}
 .btn.stop:active{background:#f85149;color:#fff}
 .btn.wake{background:#1f6feb22;border-color:#1f6feb;color:#58a6ff}
 
+/* Keyboard drive */
+.kb-help{font-size:12px;color:#8b949e;text-align:center;line-height:1.8}
+.kb-row{margin:2px 0}
+kbd.kb-key{display:inline-block;min-width:24px;padding:2px 8px;background:#21262d;border:1px solid #30363d;
+border-radius:4px;color:#c9d1d9;font-family:'Consolas','Ubuntu Mono',monospace;font-size:12px;font-weight:700;text-align:center}
+kbd.kb-key.active{background:#1f6feb;border-color:#58a6ff;color:#fff}
+kbd.kb-space{min-width:120px}
+kbd.kb-space.active{background:#f85149;border-color:#f85149;color:#fff}
+.kb-active{margin-top:4px;font-size:11px;color:#3fb950}
+
 /* Log */
 .log-box{flex:1;min-height:0;overflow-y:auto;font-family:'Consolas','Ubuntu Mono',monospace;font-size:11px;padding:4px}
 .log-box div{padding:1px 0;border-bottom:1px solid #21262d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -180,17 +190,13 @@ font-size:11px;color:#484f58;gap:20px}
 <button class="btn stop" onclick="cmd('stop')">STOP</button>
 </div></div>
 
-<div class="card"><div class="lbl">Manual Drive</div>
-<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:2px;max-width:200px;margin:0 auto">
-<div></div>
-<button class="btn" onmousedown="mv(30,0,0)" onmouseup="mv(0,0,0)" ontouchstart="mv(30,0,0)" ontouchend="mv(0,0,0)">FWD</button>
-<div></div>
-<button class="btn" onmousedown="mv(0,0,-25)" onmouseup="mv(0,0,0)" ontouchstart="mv(0,0,-25)" ontouchend="mv(0,0,0)">Turn L</button>
-<button class="btn stop" onmousedown="mv(0,0,0)" style="font-size:11px;grid-column:auto">STOP</button>
-<button class="btn" onmousedown="mv(0,0,25)" onmouseup="mv(0,0,0)" ontouchstart="mv(0,0,25)" ontouchend="mv(0,0,0)">Turn R</button>
-<button class="btn" onmousedown="mv(0,-25,0)" onmouseup="mv(0,0,0)" ontouchstart="mv(0,-25,0)" ontouchend="mv(0,0,0)">Strafe L</button>
-<button class="btn" onmousedown="mv(-30,0,0)" onmouseup="mv(0,0,0)" ontouchstart="mv(-30,0,0)" ontouchend="mv(0,0,0)">REV</button>
-<button class="btn" onmousedown="mv(0,25,0)" onmouseup="mv(0,0,0)" ontouchstart="mv(0,25,0)" ontouchend="mv(0,0,0)">Strafe R</button>
+<div class="card"><div class="lbl">Keyboard Drive</div>
+<div class="kb-help">
+<div class="kb-row"><kbd class="kb-key">W</kbd> FWD</div>
+<div class="kb-row"><kbd class="kb-key">A</kbd> Strafe L &nbsp; <kbd class="kb-key">S</kbd> REV &nbsp; <kbd class="kb-key">D</kbd> Strafe R</div>
+<div class="kb-row"><kbd class="kb-key">Q</kbd> Turn L &nbsp; <kbd class="kb-key">E</kbd> Turn R</div>
+<div class="kb-row"><kbd class="kb-key kb-space">SPACE</kbd> EMERGENCY STOP</div>
+<div class="kb-active" id="kbStatus">Keys: ready</div>
 </div></div>
 
 <div class="card" style="flex:1;min-height:0;display:flex;flex-direction:column">
@@ -225,6 +231,32 @@ ARUCO_APPR:'Approaching marker',BLOCKED:'Obstacle detected!',REROUTE:'Finding an
 PATROL:'Patrolling area',PERSON:'Approaching person',DANCE:'Dancing!',PHOTO:'Taking photo',
 LOST_REV:'Recovering track',LOST_PIVOT:'Searching for line',STOPPING:'Stopping...',SLEEP:'Sleeping'};
 let lastVoice='',logCount=0;
+
+// Keyboard drive — WASD + QE + Space
+const keys={};
+const keyMap={w:[30,0,0],s:[-30,0,0],a:[0,-25,0],d:[0,25,0],q:[0,0,-25],e:[0,0,25]};
+function updateDrive(){
+const st=document.getElementById('kbStatus');
+// Highlight active keys
+document.querySelectorAll('kbd.kb-key').forEach(k=>{
+const letter=k.textContent.trim().toLowerCase();
+if(letter==='space')k.classList.toggle('active',!!keys[' ']);
+else k.classList.toggle('active',!!keys[letter]);
+});
+if(keys[' ']){mv(0,0,0);cmd('stop');st.textContent='EMERGENCY STOP';st.style.color='#f85149';return}
+let vx=0,vy=0,omega=0;
+for(const[k,v]of Object.entries(keyMap)){if(keys[k]){vx+=v[0];vy+=v[1];omega+=v[2]}}
+if(vx||vy||omega){mv(vx,vy,omega);st.textContent='Driving: vx='+vx+' vy='+vy+' \u03c9='+omega;st.style.color='#58a6ff'}
+else{mv(0,0,0);st.textContent='Keys: ready';st.style.color='#3fb950'}
+}
+document.addEventListener('keydown',e=>{
+const k=e.key.toLowerCase();
+if(k in keyMap||k===' '){e.preventDefault();if(!keys[k]){keys[k]=true;updateDrive()}}
+});
+document.addEventListener('keyup',e=>{
+const k=e.key.toLowerCase();
+if(k in keyMap||k===' '){e.preventDefault();delete keys[k];updateDrive()}
+});
 
 function cmd(text){
 addLog('cmd','> '+text);
