@@ -134,16 +134,21 @@ class DebugGUI:
 
     def start(self):
         pygame.init()
-        # Try to match display, fall back to windowed
+        # Go fullscreen on the available display
         try:
             info = pygame.display.Info()
-            if info.current_w >= 1280 and info.current_h >= 720:
-                self.W = min(info.current_w, 1280)
-                self.H = min(info.current_h, 720)
+            self.W = info.current_w
+            self.H = info.current_h
+            if self.W > 0 and self.H > 0:
+                self._screen = pygame.display.set_mode((self.W, self.H), pygame.FULLSCREEN)
+            else:
+                self.W, self.H = 1280, 720
+                self._screen = pygame.display.set_mode((self.W, self.H))
         except Exception:
-            pass
-        self._screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
+            self.W, self.H = 1280, 720
+            self._screen = pygame.display.set_mode((self.W, self.H))
         pygame.display.set_caption("SONNY — Project Alfred Dashboard")
+        pygame.mouse.set_visible(False)
         self._clock = pygame.time.Clock()
 
         ui_fonts = ["ubuntu", "dejavusans", "segoeui", "freesans", "arial"]
@@ -587,7 +592,19 @@ class DebugGUI:
         fsm = self.fsm
         lf = fsm.line_follower if fsm else None
 
-        if key == pygame.K_m:
+        if key == pygame.K_F11:
+            # Toggle fullscreen
+            if self._screen.get_flags() & pygame.FULLSCREEN:
+                self._screen = pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
+                self.W, self.H = 1280, 720
+                pygame.mouse.set_visible(True)
+            else:
+                info = pygame.display.Info()
+                self.W, self.H = info.current_w, info.current_h
+                self._screen = pygame.display.set_mode((self.W, self.H), pygame.FULLSCREEN)
+                pygame.mouse.set_visible(False)
+            return
+        elif key == pygame.K_m:
             self._manual_mode = not self._manual_mode
             self._pressed = {k: False for k in self._pressed}
             if fsm:

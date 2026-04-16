@@ -292,10 +292,39 @@ def main():
         except Exception as e:
             print(f"[Web] Failed to start: {e} (install flask: pip install flask)")
 
-    # Force GUI to Pi's HDMI monitor if requested
+    # Force GUI to Pi's own HDMI monitor
     if args.local_display:
-        os.environ["DISPLAY"] = ":0"
-        print("[GUI] Displaying on Pi's HDMI monitor")
+        # Try multiple display options to find one that works
+        # Priority: current DISPLAY, then :0, then :1, then direct framebuffer
+        import subprocess
+        found_display = False
+
+        # First try to find xhost and allow connections
+        for display in [":0", ":1"]:
+            try:
+                subprocess.run(["xhost", "+local:"], env={**os.environ, "DISPLAY": display},
+                             capture_output=True, timeout=2)
+            except Exception:
+                pass
+
+        # Try each display
+        for display in [os.environ.get("DISPLAY", ":0"), ":0", ":1"]:
+            os.environ["DISPLAY"] = display
+            try:
+                import pygame
+                pygame.display.init()
+                pygame.display.quit()
+                found_display = True
+                print(f"[GUI] Using display {display}")
+                break
+            except Exception:
+                continue
+
+        if not found_display:
+            # Fall back to DRM/KMS framebuffer (no X11 needed)
+            os.environ.pop("DISPLAY", None)
+            os.environ["SDL_VIDEODRIVER"] = "kmsdrm"
+            print("[GUI] Using direct framebuffer (kmsdrm)")
 
     # GUI mode
     gui = None
