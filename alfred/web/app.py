@@ -60,9 +60,9 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d
 .hdr .voice-heard b{color:#58a6ff}
 .hdr .voice-intent{color:#3fb950;font-size:13px;margin-left:8px}
 
-/* Camera */
-.cam{background:#161b22;border-radius:8px;position:relative;overflow:hidden}
-.cam img{width:100%;height:100%;object-fit:contain;display:block}
+/* Camera — no crop, maintain aspect ratio, center in panel */
+.cam{background:#000;border-radius:8px;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center}
+.cam img{max-width:100%;max-height:100%;object-fit:contain;display:block}
 .cam .overlay{position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.7);padding:6px 10px;font-size:12px}
 .cam .overlay span{margin-right:14px}
 .cam .no-feed{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#484f58;font-size:16px}
@@ -128,7 +128,7 @@ font-size:11px;color:#484f58;gap:20px}
 
 <!-- CAMERA — preserve aspect ratio, no crop -->
 <div class="cam">
-<img id="camFeed" src="/video_feed" style="width:100%;height:100%;object-fit:contain;background:#000"
+<img id="camFeed" src="/video_feed"
  onerror="this.style.display='none';document.getElementById('noFeed').style.display='block'">
 <span class="no-feed" id="noFeed" style="display:none">No Camera Feed</span>
 <div class="overlay">
