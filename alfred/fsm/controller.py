@@ -212,7 +212,7 @@ class AlfredFSM:
         self._dance_start = None
         self._dance_duration = 5.0
         self._photo_taken = False
-        self._aruco_target_id = None
+        self._aruco_target_id = 8  # default marker ID (our assigned ID)
         self._last_aruco_pose = None
         self._last_frame = None
         self._last_faces = []
@@ -434,14 +434,20 @@ class AlfredFSM:
         if target:
             confirmations = {
                 "follow_track": "Following the track.",
-                "go_to_aruco":  "Searching for the marker.",
                 "dance":        "Time to dance!",
                 "take_photo":   "Say cheese!",
                 "come_here":    "Coming to you.",
                 "patrol":       "Starting patrol.",
                 "search":       "Searching for the marker.",
             }
-            msg = confirmations.get(intent, "Got it.")
+            if intent in ("go_to_aruco", "search"):
+                marker_id = self.intent_classifier.extract_marker_id(text)
+                if marker_id is not None:
+                    msg = f"Searching for marker {marker_id}."
+                else:
+                    msg = "Searching for marker 8."
+            else:
+                msg = confirmations.get(intent, "Got it.")
             if self.speaker:
                 self.speaker.say(msg)
             if self.gui:
@@ -453,8 +459,17 @@ class AlfredFSM:
                 self._dance_start = time.monotonic()
             elif target == State.PHOTO:
                 self._photo_taken = False
-            elif target == State.ARUCO_SEARCH and self.aruco_approach:
-                self.aruco_approach.reset()
+            elif target == State.ARUCO_SEARCH:
+                # Check if a specific marker ID was mentioned
+                marker_id = self.intent_classifier.extract_marker_id(text)
+                if marker_id is not None:
+                    self._aruco_target_id = marker_id
+                    print(f"[ArUco] Target marker set to ID {marker_id}")
+                else:
+                    self._aruco_target_id = 8  # default: our assigned ID
+                    print(f"[ArUco] Using default marker ID 8")
+                if self.aruco_approach:
+                    self.aruco_approach.reset()
             self.transition(target)
 
         elif intent in ("confirm", "cancel"):
@@ -521,7 +536,11 @@ class AlfredFSM:
         self._tick_following()
 
     def _tick_aruco_search(self):
-        """Scan for ArUco markers by rotating slowly."""
+        """Scan for ArUco markers by rotating slowly.
+
+        If a target ID is set, only approach that specific marker.
+        If no target ID, approach the first marker found.
+        """
         # R4: Check ultrasonic obstacle while searching
         if self._check_ultrasonic_obstacle():
             self.transition(State.BLOCKED)
@@ -530,10 +549,29 @@ class AlfredFSM:
         if self.aruco_detector and self._last_frame is not None:
             markers = self.aruco_detector.detect(self._last_frame)
             if markers:
-                # Found a marker — start approach
-                self._aruco_target_id = markers[0]["id"]
-                self.transition(State.ARUCO_APPROACH)
-                return
+                # Look for our specific target marker
+                target = None
+                if self._aruco_target_id is not None:
+                    for m in markers:
+                        if m["id"] == self._aruco_target_id:
+                            target = m
+                            break
+                    if target is None:
+                        # See markers but not our target — keep searching
+                        # Show what we see for debugging
+                        seen_ids = [m["id"] for m in markers]
+                        print(f"[ArUco] See IDs {seen_ids}, looking for {self._aruco_target_id}")
+                else:
+                    # No specific target — take the first one
+                    target = markers[0]
+                    self._aruco_target_id = target["id"]
+
+                if target:
+                    print(f"[ArUco] Found target marker ID {self._aruco_target_id}!")
+                    if self.speaker:
+                        self.speaker.say(f"Found marker {self._aruco_target_id}. Approaching.")
+                    self.transition(State.ARUCO_APPROACH)
+                    return
 
         # Slow rotation to scan for markers
         self.uart.send(cmd_vector(0, 0, 30))

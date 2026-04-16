@@ -52,6 +52,8 @@ Competition Requirements (Minilab 6 / Project Alfred)
 R1: Voice commands — wake phrase "Hello Sonny", FOLLOW TRACK, GO TO QR CODE. VOSK STT + exact keyword matching. ✅ (code done, accuracy needs improvement)
 R2: Line-following delivery. IR sensors + weighted algorithmic control. ✅ (code done, needs ESP32 hardware fix)
 R3: ArUco marker approach. Visual-only with EMA smoothing + simultaneous steer/drive. ✅ (code done, needs ESP32)
+    Our assigned marker ID is 8. Robot can also target specific IDs via voice: "go to marker 42"
+    EC5 bonus: can switch targets mid-task ("now go to marker 18")
 R4: Obstacle detection — ultrasonic HC-SR04 only (camera detection disabled — too many false positives). ✅ (code done, needs ultrasonic wired)
 R5: Intention indicators — NeoPixel LEDs per state, TTS (espeak-ng), buzzer, OLED eyes, 14" screen GUI. ✅
 EC1: Gesture recognition — MediaPipe hands, 6 gestures, gesture→action in patrol. ✅

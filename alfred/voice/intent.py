@@ -121,3 +121,40 @@ class IntentClassifier:
                 return (intent, 1.0)
 
         return ("unknown", 0.0)
+
+    @staticmethod
+    def extract_marker_id(text):
+        """Extract a marker ID number from voice text.
+
+        Examples:
+            "go to marker 42" → 42
+            "marker eight" → 8
+            "find marker 18" → 18
+            "go to qr code" → None (no specific ID)
+
+        Returns:
+            int marker ID, or None if no specific ID mentioned.
+        """
+        import re
+        lower = text.lower().strip()
+
+        # Try numeric: "marker 42", "code 8", "marker number 18"
+        match = re.search(r'(?:marker|code|aruco)\s*(?:number\s*)?(\d+)', lower)
+        if match:
+            return int(match.group(1))
+
+        # Try word numbers
+        word_to_num = {
+            "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+            "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+            "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+            "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+            "eighteen": 18, "nineteen": 19, "twenty": 20,
+            "forty two": 42, "forty-two": 42, "twenty seven": 27,
+            "forty three": 43, "forty-three": 43,
+        }
+        for word, num in sorted(word_to_num.items(), key=lambda x: len(x[0]), reverse=True):
+            if word in lower:
+                return num
+
+        return None
