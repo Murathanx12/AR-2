@@ -211,6 +211,7 @@ class AlfredFSM:
         # Per-state context
         self._dance_start = None
         self._dance_duration = 10.0
+        self._dance_proc = None
         self._photo_taken = False
         self._aruco_target_id = None  # None = follow any marker, int = specific ID
         self._last_aruco_pose = None
@@ -811,38 +812,53 @@ class AlfredFSM:
             self.leds.rainbow_cycle(speed=0.03, duration=self._dance_duration)
 
     def _play_dance_music(self):
-        """Play dance music through speaker using espeak singing or audio file."""
+        """Play dance music through speaker using audio file."""
         import subprocess
         import threading
         def _play():
             try:
-                # Try to play a music file first
                 import os
                 music_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
                                         "assets", "sounds")
-                for name in ["dance.mp3", "dance.wav", "butterfly.mp3"]:
+                music_file = None
+                for name in ["butterfly.mp3", "dance.mp3", "dance.wav"]:
                     path = os.path.join(music_dir, name)
                     if os.path.exists(path):
-                        subprocess.run(["aplay", path] if name.endswith(".wav") else
-                                      ["mpg123", "-q", path],
-                                      timeout=15, capture_output=True)
+                        music_file = path
+                        break
+                if not music_file:
+                    print("[Dance] No music file found in assets/sounds/")
+                    return
+
+                # Try multiple players in order of preference
+                players = [
+                    ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", music_file],
+                    ["mpg123", "-q", music_file],
+                    ["cvlc", "--play-and-exit", "--no-video", "-q", music_file],
+                    ["aplay", music_file],
+                ]
+                for cmd in players:
+                    try:
+                        self._dance_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        self._dance_proc.wait(timeout=15)
                         return
-                # No music file — use espeak to sing
-                subprocess.run(["espeak-ng", "-v", "en+f3", "-s", "200", "-p", "80",
-                               "Ai ai ai, I am your little butterfly! "
-                               "Green black and blue make the colors in the sky!"],
-                              timeout=10, capture_output=True)
-            except Exception:
-                pass
+                    except FileNotFoundError:
+                        continue
+                    except subprocess.TimeoutExpired:
+                        self._dance_proc.kill()
+                        return
+                print("[Dance] No audio player found. Install: sudo apt install ffmpeg")
+            except Exception as e:
+                print(f"[Dance] Music error: {e}")
         self._dance_music_thread = threading.Thread(target=_play, daemon=True)
         self._dance_music_thread.start()
 
     def _stop_dance_music(self):
         """Stop dance music."""
-        import subprocess
         try:
-            subprocess.run(["pkill", "-f", "mpg123"], capture_output=True, timeout=2)
-            subprocess.run(["pkill", "-f", "aplay"], capture_output=True, timeout=2)
+            if hasattr(self, '_dance_proc') and self._dance_proc and self._dance_proc.poll() is None:
+                self._dance_proc.kill()
+                self._dance_proc = None
         except Exception:
             pass
 
