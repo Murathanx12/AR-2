@@ -421,28 +421,45 @@ class WebController:
                         continue
                     try:
                         import cv2
+                        # IMPORTANT: copy to avoid modifying shared frame
                         display = frame.copy()
+                        h, w = display.shape[:2]
+
+                        # Draw center crosshair (thin green lines)
+                        cv2.line(display, (w//2, 0), (w//2, h), (0, 100, 0), 1)
+                        cv2.line(display, (0, h//2), (w, h//2), (0, 100, 0), 1)
+
+                        # Draw frame size for debugging
+                        cv2.putText(display, f"{w}x{h}", (10, h-10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 0), 1)
+
+                        # Draw faces
                         if self.fsm._last_faces:
                             for face in self.fsm._last_faces:
-                                x,y,w,h = face["bbox"]
-                                cv2.rectangle(display,(x,y),(x+w,y+h),(0,255,0),2)
+                                fx,fy,fw,fh = face["bbox"]
+                                cv2.rectangle(display,(fx,fy),(fx+fw,fy+fh),(0,255,0),2)
                                 conf = face.get("confidence", 0)
-                                cv2.putText(display,f"Face {conf:.0%}",(x,y-8),
+                                cv2.putText(display,f"Face {conf:.0%}",(fx,fy-8),
                                     cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,255,0),1)
+
+                        # Draw ArUco markers
                         if self.fsm.aruco_detector:
                             ms = self.fsm.aruco_detector.detect(display)
                             self.fsm.aruco_detector.draw_markers(display, ms)
+
+                        # Draw obstacles
                         if self.fsm._last_obstacles:
                             for obs in self.fsm._last_obstacles:
                                 if "bbox" in obs:
-                                    x,y,w,h = obs["bbox"]
-                                    cv2.rectangle(display,(x,y),(x+w,y+h),(0,0,255),2)
-                        # Send full frame — browser handles scaling via object-fit:contain
-                        _, jpeg = cv2.imencode('.jpg', display, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                                    ox,oy,ow,oh = obs["bbox"]
+                                    cv2.rectangle(display,(ox,oy),(ox+ow,oy+oh),(0,0,255),2)
+
+                        # Encode FULL frame as JPEG — no resize
+                        _, jpeg = cv2.imencode('.jpg', display, [cv2.IMWRITE_JPEG_QUALITY, 75])
                         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
                     except Exception:
                         pass
-                    time.sleep(0.1)
+                    time.sleep(0.1)  # ~10fps
             return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
         @self._app.route("/logs")
