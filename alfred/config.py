@@ -83,8 +83,8 @@ class VoiceConfig:
 @dataclass(frozen=True)
 class VisionConfig:
     """Vision subsystem."""
-    camera_index: int = 0
-    resolution: Tuple[int, int] = (800, 600)
+    camera_index: int = 1
+    resolution: Tuple[int, int] = (1920, 1080)
     fps: int = 30
     aruco_dict: str = "DICT_4X4_50"
     aruco_stop_size: int = 150  # pixel size at which marker = "arrived"
