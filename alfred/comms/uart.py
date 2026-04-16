@@ -53,8 +53,8 @@ class UARTBridge:
             print(f"[UART] FAILED to open {self._port}: {e}")
             print(f"[UART] Motors will NOT work. Check:")
             print(f"[UART]   1. ESP32 is powered on (12V battery)")
-            print(f"[UART]   2. UART wires: Pi TX(pin8) -> ESP32 RX(GPIO16)")
-            print(f"[UART]   3. UART wires: Pi RX(pin10) -> ESP32 TX(GPIO17)")
+            print(f"[UART]   2. UART wires: Pi GPIO4 (pin 7) -> ESP32 RX (GPIO16)")
+            print(f"[UART]   3. UART wires: Pi GPIO5 (pin 29) -> ESP32 TX (GPIO17)")
             print(f"[UART]   4. GND connected between Pi and ESP32")
             print(f"[UART]   5. Run: ls -la /dev/ttyAMA2")
 

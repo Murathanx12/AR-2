@@ -591,13 +591,18 @@ void setup()
   // Buzzer
   pinMode(BUZZER_PIN, OUTPUT);
 
+  SERIAL.println("ESP32 V4 booting...");
+  SERIAL.println("UART2 on GPIO16(RX)/GPIO17(TX) at 115200");
+
   uart2.println("ESP32 Ready (V4 with ultrasonic + LED + buzzer)");
+  SERIAL.println("ESP32 Ready — sent hello on UART2");
   IO_init();
 
   // Startup indicator: flash blue
   setLedSolid(0, 0, 255);
   delay(500);
   setLedSolid(0, 0, 0);
+  SERIAL.println("Setup complete. Entering main loop.");
 }
 
 unsigned long lastPingTime = 0;
@@ -654,6 +659,7 @@ void loop()
   // --- Periodic heartbeat ---
   if (now - lastPingTime >= PING_INTERVAL_MS) {
     uart2.println("Hello from ESP32");
+    SERIAL.println("[heartbeat] alive, IR=" + String(readIrStatus()));
     lastPingTime = now;
   }
 }

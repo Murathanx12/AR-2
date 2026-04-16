@@ -21,11 +21,11 @@ IR SENSORS (5 pins — TCRT5000 reflective sensors)
   Sensor 4 (NE — right-center): GPIO 15
   Sensor 5 (E  — far right):    GPIO 45
 
-UART to Raspberry Pi (2 pins)
-─────────────────────────────
-  ESP32 RX:  GPIO 16  ←── Pi TX (GPIO14, physical pin 8)
-  ESP32 TX:  GPIO 17  ──→ Pi RX (GPIO15, physical pin 10)
-  GND:       GND      ←→  Pi GND (physical pin 6)
+UART2 to Raspberry Pi (3 wires)
+────────────────────────────────
+  ESP32 RX (GPIO16) ←── Pi TX (GPIO4, physical pin 7)
+  ESP32 TX (GPIO17) ──→ Pi RX (GPIO5, physical pin 29)
+  ESP32 GND         ←→  Pi GND (physical pin 6, 9, 14, 20, 25, 30, 34, or 39)
 
 ULTRASONIC HC-SR04 (2 pins)
 ────────────────────────────
@@ -51,9 +51,9 @@ Pi 5 GPIO Header (relevant pins only)
   Pin 3  (GPIO 2)  → I2C SDA → OLED SDA + PCA9685 SDA
   Pin 5  (GPIO 3)  → I2C SCL → OLED SCL + PCA9685 SCL
   Pin 6  (GND)     → ESP32 GND + OLED GND + PCA9685 GND
-  Pin 8  (GPIO14)  → Pi TX → ESP32 RX (GPIO16)    [UART2]
-  Pin 9  (GND)     → OLED/PCA9685 GND
-  Pin 10 (GPIO15)  → Pi RX → ESP32 TX (GPIO17)    [UART2]
+  Pin 7  (GPIO4)   → Pi TX (UART2) → ESP32 RX (GPIO16)
+  Pin 9  (GND)     → spare GND
+  Pin 29 (GPIO5)   → Pi RX (UART2) → ESP32 TX (GPIO17)
 
 USB Ports:
   USB 3.0 (blue)   → Camera
@@ -70,11 +70,12 @@ Micro-HDMI:
 ```
   Raspberry Pi 5              ESP32-S3
   ┌──────────┐                ┌──────────┐
-  │  TX (pin 8, GPIO14) ───────→ RX (GPIO16) │
-  │  RX (pin10, GPIO15) ←──────── TX (GPIO17) │
+  │  TX (pin 7,  GPIO4) ───────→ RX (GPIO16) │
+  │  RX (pin 29, GPIO5) ←──────── TX (GPIO17) │
   │  GND (pin 6)        ←──────→ GND          │
   └──────────┘                └──────────┘
 
+  Port: /dev/ttyAMA2
   Baud: 115200, 8N1
   Protocol: text commands "name:param1,param2\n"
 ```

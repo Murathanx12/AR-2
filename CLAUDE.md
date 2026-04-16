@@ -15,7 +15,8 @@ Architecture
 ESP32-S3: Motor PWM + 5x IR sensor reading at 20Hz + HC-SR04 ultrasonic at 10Hz + NeoPixel LEDs + buzzer. Firmware: esp32/src/main.cpp (PlatformIO).
 Raspberry Pi 5: Decision engine. Python. FSM + vision + voice + expression.
 14" Type-C monitor: Robot face (OLED eyes) + camera feed + status GUI via Pygame.
-UART: 115200 baud on /dev/ttyAMA2. Pi sends mv_vector:vx,vy,omega\n, ESP sends IR_STATUS:XX\n and DIST:XX.X\n.
+UART: 115200 baud on /dev/ttyAMA2 (Pi GPIO4=TX pin7, GPIO5=RX pin29). Pi sends mv_vector:vx,vy,omega\n, ESP sends IR_STATUS:XX\n and DIST:XX.X\n.
+IMPORTANT: Pi UART2 pins are GPIO4 (pin 7) and GPIO5 (pin 29), NOT GPIO14/GPIO15 (pins 8/10). Per INTC1002 Tutorial 3.
 Mecanum IK: FL=vx+vy+omega, FR=vx-vy-omega, RL=vx-vy+omega, RR=vx+vy-omega. PWM 50-200 from 0-100%.
 Wiring: See docs/WIRING.md for complete pin map.
 
