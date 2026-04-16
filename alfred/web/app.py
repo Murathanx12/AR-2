@@ -170,8 +170,7 @@ font-size:11px;color:#484f58;gap:20px}
 <button class="btn wake" onclick="cmd('hello sonny')">Wake Up</button>
 <button class="btn" onclick="cmd('follow track')">Follow Track</button>
 <button class="btn" onclick="cmd('follow the marker')">Any Marker</button>
-<button class="btn" onclick="cmd('go to marker 8')">Marker 8</button>
-<button class="btn" onclick="var id=document.getElementById('mkrId').value;cmd('go to marker '+id)">ID:<input id="mkrId" type="number" value="42" min="0" max="49" style="width:32px;background:#161b22;border:1px solid #30363d;color:#c9d1d9;border-radius:3px;text-align:center" onclick="event.stopPropagation()"></button>
+<button class="btn" onclick="cmd('go to marker '+document.getElementById('mkrId').value)">Go to Marker <input id="mkrId" type="number" value="8" min="0" max="49" style="width:36px;background:#161b22;border:1px solid #30363d;color:#c9d1d9;border-radius:3px;text-align:center;font-size:14px;font-weight:bold" onclick="event.stopPropagation()"></button>
 <button class="btn" onclick="cmd('come here')">Follow Human</button>
 <button class="btn" onclick="cmd('dance')">Dance</button>
 <button class="btn" onclick="cmd('patrol')">Patrol</button>

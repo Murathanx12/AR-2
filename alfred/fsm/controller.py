@@ -210,7 +210,7 @@ class AlfredFSM:
 
         # Per-state context
         self._dance_start = None
-        self._dance_duration = 5.0
+        self._dance_duration = 10.0
         self._photo_taken = False
         self._aruco_target_id = None  # None = follow any marker, int = specific ID
         self._last_aruco_pose = None
@@ -773,26 +773,32 @@ class AlfredFSM:
         self.line_follower.debug_omega = omega
 
     def _tick_dancing(self):
-        """Execute a dance routine with timed moves."""
+        """Execute a dance routine with timed moves and music."""
         if self._dance_start is None:
             self._dance_start = time.monotonic()
+            # Play music through speaker
+            self._play_dance_music()
 
         elapsed = time.monotonic() - self._dance_start
 
         if elapsed >= self._dance_duration:
             self.uart.send(cmd_stop())
             self._dance_start = None
+            self._stop_dance_music()
             self.transition(State.IDLE)
             return
 
-        phase = int(elapsed / 0.5) % 6
+        # More dynamic dance with 8 phases
+        phase = int(elapsed / 0.4) % 8
         moves = [
-            (0, 0, 60),     # spin right
-            (30, 0, 0),     # forward
-            (0, 0, -60),    # spin left
-            (-30, 0, 0),    # backward
-            (0, 40, 0),     # strafe right
-            (0, -40, 0),    # strafe left
+            (0, 0, 50),     # spin right
+            (25, 25, 0),    # diagonal forward-right
+            (0, 0, -50),    # spin left
+            (25, -25, 0),   # diagonal forward-left
+            (-20, 0, 0),    # backward
+            (0, 30, 0),     # strafe right
+            (0, -30, 0),    # strafe left
+            (0, 0, 70),     # fast spin
         ]
         vx, vy, omega = moves[phase]
         self.uart.send(cmd_vector(vx, vy, omega))
@@ -803,6 +809,42 @@ class AlfredFSM:
         # Rainbow LEDs already set via transition()
         if self.leds and elapsed < 0.1:
             self.leds.rainbow_cycle(speed=0.03, duration=self._dance_duration)
+
+    def _play_dance_music(self):
+        """Play dance music through speaker using espeak singing or audio file."""
+        import subprocess
+        import threading
+        def _play():
+            try:
+                # Try to play a music file first
+                import os
+                music_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                                        "assets", "sounds")
+                for name in ["dance.mp3", "dance.wav", "butterfly.mp3"]:
+                    path = os.path.join(music_dir, name)
+                    if os.path.exists(path):
+                        subprocess.run(["aplay", path] if name.endswith(".wav") else
+                                      ["mpg123", "-q", path],
+                                      timeout=15, capture_output=True)
+                        return
+                # No music file — use espeak to sing
+                subprocess.run(["espeak-ng", "-v", "en+f3", "-s", "200", "-p", "80",
+                               "Ai ai ai, I am your little butterfly! "
+                               "Green black and blue make the colors in the sky!"],
+                              timeout=10, capture_output=True)
+            except Exception:
+                pass
+        self._dance_music_thread = threading.Thread(target=_play, daemon=True)
+        self._dance_music_thread.start()
+
+    def _stop_dance_music(self):
+        """Stop dance music."""
+        import subprocess
+        try:
+            subprocess.run(["pkill", "-f", "mpg123"], capture_output=True, timeout=2)
+            subprocess.run(["pkill", "-f", "aplay"], capture_output=True, timeout=2)
+        except Exception:
+            pass
 
     def _tick_photo(self):
         """Capture a photo from camera."""
