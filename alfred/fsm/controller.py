@@ -578,7 +578,7 @@ class AlfredFSM:
         self.line_follower.debug_omega = 15
 
     def _tick_aruco_approach(self):
-        """Drive toward detected ArUco marker using visual approach (R3)."""
+        """Drive toward detected ArUco marker — center first, then approach, then hold."""
         if not self.aruco_detector or not self.aruco_approach or self._last_frame is None:
             self.transition(State.IDLE)
             return
@@ -589,36 +589,36 @@ class AlfredFSM:
             return
 
         markers = self.aruco_detector.detect(self._last_frame)
+
+        # Find target marker (or any marker if target_id is None)
         target_marker = None
-        for m in markers:
-            if m["id"] == self._aruco_target_id:
-                target_marker = m
-                break
+        if self._aruco_target_id is not None:
+            for m in markers:
+                if m["id"] == self._aruco_target_id:
+                    target_marker = m
+                    break
+        elif markers:
+            target_marker = max(markers, key=lambda m: m["size"])
+            self._aruco_target_id = target_marker["id"]
 
         if target_marker is None:
-            # Lost the marker — go back to searching
+            if markers:
+                # See markers but not our target
+                seen = [m["id"] for m in markers]
+                print(f"[ArUco] See {seen}, want {self._aruco_target_id}")
+            # Lost target — search again
             self.transition(State.ARUCO_SEARCH)
             return
 
-        # Try calibrated approach first, fall back to visual-only
-        pose = self.aruco_detector.estimate_pose(target_marker)
-        if pose:
-            # Calibrated approach
-            if self.aruco_approach.is_arrived(pose["tvec"]):
-                self._on_aruco_arrived()
-                return
-            vx, vy, omega = self.aruco_approach.compute_approach(pose["tvec"], pose["rvec"])
-        else:
-            # Visual-only approach (R3 — no camera calibration needed)
-            h, w = self._last_frame.shape[:2]
-            result = self.aruco_approach.compute_visual_approach(
-                target_marker, w, h
-            )
-            if result is None:
-                # Arrived
-                self._on_aruco_arrived()
-                return
-            vx, vy, omega = result
+        # Visual approach
+        h, w = self._last_frame.shape[:2]
+        result = self.aruco_approach.compute_visual_approach(target_marker, w, h)
+
+        if result is None:
+            self._on_aruco_arrived()
+            return
+
+        vx, vy, omega = result
 
         self.uart.send(cmd_vector(int(vx), int(vy), int(omega)))
         self.line_follower.debug_vx = int(vx)

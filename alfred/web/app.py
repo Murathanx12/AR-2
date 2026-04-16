@@ -126,14 +126,14 @@ font-size:11px;color:#484f58;gap:20px}
 <span class="voice-intent" id="intentD"></span>
 </div>
 
-<!-- CAMERA -->
+<!-- CAMERA — preserve aspect ratio, no crop -->
 <div class="cam">
-<img id="camFeed" src="/video_feed" onerror="this.style.display='none';document.getElementById('noFeed').style.display='block'">
+<img id="camFeed" src="/video_feed" style="width:100%;height:100%;object-fit:contain;background:#000"
+ onerror="this.style.display='none';document.getElementById('noFeed').style.display='block'">
 <span class="no-feed" id="noFeed" style="display:none">No Camera Feed</span>
 <div class="overlay">
 <span id="camMarkers" style="color:#3fb950"></span>
 <span id="camFaces" style="color:#58a6ff"></span>
-<span id="camHands" style="color:#d29922"></span>
 </div>
 </div>
 
@@ -165,20 +165,33 @@ font-size:11px;color:#484f58;gap:20px}
 <div class="card"><div class="lbl">Voice (Whisper)</div>
 <div id="voiceText" style="font-size:13px;color:#bc8cff;min-height:18px">-</div></div>
 
-<div class="card"><div class="lbl">Commands</div>
+<div class="card"><div class="lbl">Voice Commands</div>
 <div class="btns">
 <button class="btn wake" onclick="cmd('hello sonny')">Wake Up</button>
 <button class="btn" onclick="cmd('follow track')">Follow Track</button>
-<button class="btn" onclick="cmd('follow the marker')">Follow Marker</button>
+<button class="btn" onclick="cmd('follow the marker')">Any Marker</button>
 <button class="btn" onclick="cmd('go to marker 8')">Marker 8</button>
-<button class="btn" onclick="var id=document.getElementById('mkrId').value;cmd('go to marker '+id)">Go to ID:<input id="mkrId" type="number" value="42" min="0" max="49" style="width:36px;background:#161b22;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;text-align:center" onclick="event.stopPropagation()"></button>
+<button class="btn" onclick="var id=document.getElementById('mkrId').value;cmd('go to marker '+id)">ID:<input id="mkrId" type="number" value="42" min="0" max="49" style="width:32px;background:#161b22;border:1px solid #30363d;color:#c9d1d9;border-radius:3px;text-align:center" onclick="event.stopPropagation()"></button>
+<button class="btn" onclick="cmd('come here')">Follow Human</button>
 <button class="btn" onclick="cmd('dance')">Dance</button>
 <button class="btn" onclick="cmd('patrol')">Patrol</button>
 <button class="btn" onclick="cmd('photo')">Photo</button>
-<button class="btn" onclick="cmd('come here')">Come Here</button>
 <button class="btn" onclick="cmd('search')">Search</button>
-<button class="btn stop" onclick="cmd('stop')">STOP</button>
 <button class="btn" onclick="cmd('sleep')">Sleep</button>
+<button class="btn stop" onclick="cmd('stop')">STOP</button>
+</div></div>
+
+<div class="card"><div class="lbl">Manual Drive</div>
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:2px;max-width:200px;margin:0 auto">
+<div></div>
+<button class="btn" onmousedown="mv(30,0,0)" onmouseup="mv(0,0,0)" ontouchstart="mv(30,0,0)" ontouchend="mv(0,0,0)">FWD</button>
+<div></div>
+<button class="btn" onmousedown="mv(0,0,-25)" onmouseup="mv(0,0,0)" ontouchstart="mv(0,0,-25)" ontouchend="mv(0,0,0)">Turn L</button>
+<button class="btn stop" onmousedown="mv(0,0,0)" style="font-size:11px;grid-column:auto">STOP</button>
+<button class="btn" onmousedown="mv(0,0,25)" onmouseup="mv(0,0,0)" ontouchstart="mv(0,0,25)" ontouchend="mv(0,0,0)">Turn R</button>
+<button class="btn" onmousedown="mv(0,-25,0)" onmouseup="mv(0,0,0)" ontouchstart="mv(0,-25,0)" ontouchend="mv(0,0,0)">Strafe L</button>
+<button class="btn" onmousedown="mv(-30,0,0)" onmouseup="mv(0,0,0)" ontouchstart="mv(-30,0,0)" ontouchend="mv(0,0,0)">REV</button>
+<button class="btn" onmousedown="mv(0,25,0)" onmouseup="mv(0,0,0)" ontouchstart="mv(0,25,0)" ontouchend="mv(0,0,0)">Strafe R</button>
 </div></div>
 
 <div class="card" style="flex:1;min-height:0;display:flex;flex-direction:column">
@@ -222,6 +235,10 @@ document.getElementById('heard').textContent=text;
 document.getElementById('intentD').textContent=d.intent+' ('+d.confidence+')';
 addLog('intent','= '+d.intent+' ('+d.confidence+')');
 }).catch(e=>addLog('err','! '+e.message))}
+
+function mv(vx,vy,omega){
+fetch(API+'/move',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({vx,vy,omega})}).catch(()=>{})}
 
 function addLog(cls,msg){
 const l=document.getElementById('log');logCount++;
@@ -332,6 +349,25 @@ class WebController:
 
             return jsonify({"intent": intent, "confidence": confidence, "text": text})
 
+        @self._app.route("/move", methods=["POST"])
+        def move():
+            """Direct motor control from web UI."""
+            data = request.get_json(silent=True) or {}
+            vx = int(data.get("vx", 0))
+            vy = int(data.get("vy", 0))
+            omega = int(data.get("omega", 0))
+            if self.fsm and self.fsm.uart:
+                from alfred.comms.protocol import cmd_vector, cmd_stop
+                if vx == 0 and vy == 0 and omega == 0:
+                    self.fsm.uart.send(cmd_stop())
+                else:
+                    self.fsm.uart.send(cmd_vector(vx, vy, omega))
+                if self.fsm.line_follower:
+                    self.fsm.line_follower.debug_vx = vx
+                    self.fsm.line_follower.debug_vy = vy
+                    self.fsm.line_follower.debug_omega = omega
+            return jsonify({"ok": True})
+
         @self._app.route("/status")
         def status():
             from alfred.fsm.states import STATE_NAMES
@@ -402,7 +438,8 @@ class WebController:
                                 if "bbox" in obs:
                                     x,y,w,h = obs["bbox"]
                                     cv2.rectangle(display,(x,y),(x+w,y+h),(0,0,255),2)
-                        _, jpeg = cv2.imencode('.jpg', display, [cv2.IMWRITE_JPEG_QUALITY, 65])
+                        # Send full frame — browser handles scaling via object-fit:contain
+                        _, jpeg = cv2.imencode('.jpg', display, [cv2.IMWRITE_JPEG_QUALITY, 70])
                         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
                     except Exception:
                         pass

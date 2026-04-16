@@ -92,10 +92,11 @@ class VoiceListener:
 
     SAMPLE_RATE = 16000
     CHUNK_SIZE = 1024         # ~64ms per chunk at 16kHz
-    SILENCE_THRESHOLD = 800   # RMS energy below this = silence (raised to ignore background chat)
-    SILENCE_DURATION = 0.6    # seconds of silence to end utterance (faster response)
+    SILENCE_THRESHOLD = 1000  # RMS energy below this = silence (high = ignore background noise)
+    SILENCE_DURATION = 0.5    # seconds of silence to end utterance
     MIN_SPEECH_DURATION = 0.3 # minimum speech to process (ignore clicks/noise)
     MAX_SPEECH_DURATION = 5   # max 5 seconds per utterance (commands are short)
+    NOISE_FLOOR_FRAMES = 50   # frames to measure ambient noise level at startup
 
     def __init__(self, wake_phrase="hello sonny", model_path=None):
         self._model_path = model_path
@@ -321,7 +322,24 @@ class VoiceListener:
             print("[Voice] Listener stopped")
 
     def _whisper_loop(self, stream, pyaudio_instance):
-        """Main loop using Whisper with energy-based VAD."""
+        """Main loop using Whisper with energy-based VAD + noise calibration."""
+        # Calibrate noise floor for 1 second at startup
+        print("[Voice] Calibrating noise level (1 second)...")
+        noise_samples = []
+        for _ in range(self.NOISE_FLOOR_FRAMES):
+            try:
+                data = stream.read(self.CHUNK_SIZE, exception_on_overflow=False)
+                noise_samples.append(self._rms(data))
+            except Exception:
+                pass
+        if noise_samples:
+            avg_noise = sum(noise_samples) / len(noise_samples)
+            # Set threshold to 2x average noise (must speak louder than background)
+            self.SILENCE_THRESHOLD = max(600, int(avg_noise * 2.5))
+            print(f"[Voice] Noise floor: {avg_noise:.0f} RMS, threshold set to: {self.SILENCE_THRESHOLD}")
+        else:
+            print(f"[Voice] Using default threshold: {self.SILENCE_THRESHOLD}")
+
         audio_buffer = bytearray()
         is_speaking = False
         silence_start = 0

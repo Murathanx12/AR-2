@@ -1,11 +1,12 @@
-"""ArUco approach controller — drive toward a detected marker.
+"""ArUco approach controller — find, center, approach, and hold distance.
 
-Supports two modes:
-1. Calibrated: Uses pose estimation tvec/rvec for precise distance control.
-2. Visual-only: Uses marker pixel size and center for distance/steering
-   (like minilab6.py). Works without camera calibration.
+Behavior:
+1. SEARCH: Rotate slowly scanning for marker
+2. CENTER: Stop rotating, turn to face marker directly
+3. APPROACH: Drive forward while staying centered
+4. HOLD: Maintain distance — if marker moves, follow it
 
-Improved: simultaneous steer+drive, smooth speed ramp, temporal filtering.
+Logs centering errors and distance for debugging.
 """
 
 import math
@@ -14,110 +15,47 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Import file logger if available
+try:
+    from alfred.web.app import log_event
+except ImportError:
+    def log_event(msg): pass
+
 
 class ArucoApproach:
-    """Drives the robot toward a detected ArUco marker.
+    """Drives toward an ArUco marker with center-first behavior."""
 
-    Visual-only mode uses marker pixel size to estimate distance.
-    When the marker pixel size exceeds stop_size, the robot has arrived.
-    Uses simultaneous steering + forward motion for smooth approach.
-    """
+    # Distance thresholds (in marker pixel size)
+    STOP_SIZE = 140        # marker this big = close enough, stop
+    HOLD_MIN = 120         # if marker shrinks below this, move closer again
+    HOLD_MAX = 160         # if marker grows above this, back up slightly
+    CENTER_TOLERANCE = 0.08  # 8% of frame width = "centered"
 
-    def __init__(self, arrival_distance=0.05,
-                 stop_size=150, center_tol_frac=0.05,
-                 kp_forward=200.0, kp_lateral=120.0, kp_rotation=80.0):
-        """
-        Args:
-            arrival_distance: Distance in metres for calibrated arrival.
-            stop_size: Marker pixel size at which visual-only considers "arrived".
-            center_tol_frac: Fraction of image width for center tolerance.
-            kp_forward: Proportional gain for forward speed (calibrated mode).
-            kp_lateral: Proportional gain for lateral strafe (calibrated mode).
-            kp_rotation: Proportional gain for rotation (calibrated mode).
-        """
-        self._arrival_distance = arrival_distance
-        self._stop_size = stop_size
-        self._center_tol_frac = center_tol_frac
-        self._kp_forward = kp_forward
-        self._kp_lateral = kp_lateral
-        self._kp_rotation = kp_rotation
-        self._last_distance = None
-
-        # Temporal smoothing for visual approach
+    def __init__(self):
         self._smooth_cx = None
         self._smooth_size = None
-        self._alpha = 0.4  # EMA smoothing factor (0=no update, 1=instant)
-        self._approach_start_time = None
+        self._alpha = 0.35  # EMA smoothing
+        self._holding = False  # True when maintaining distance
 
-    # --- Calibrated approach (when camera is calibrated) ---
+    def compute_visual_approach(self, marker, frame_width, frame_height):
+        """Compute motor command to approach marker.
 
-    def compute_approach(self, tvec, rvec):
-        """Compute motor command using calibrated pose estimation.
-
-        Args:
-            tvec: Translation vector [tx, ty, tz] in metres.
-            rvec: Rotation vector (Rodrigues).
-
-        Returns:
-            Tuple (vx, vy, omega) as ints, clipped to [-150, 150].
-        """
-        tx, ty, tz = tvec[0], tvec[1], tvec[2]
-        distance = math.sqrt(tx * tx + tz * tz)
-        self._last_distance = distance
-
-        if distance <= self._arrival_distance:
-            return (0, 0, 0)
-
-        vx = self._kp_forward * max(0, tz - self._arrival_distance)
-        vx = max(10, min(150, vx))
-
-        vy = -self._kp_lateral * tx
-        vy = max(-100, min(100, vy))
-
-        bearing = math.atan2(tx, tz)
-        omega = -self._kp_rotation * bearing
-        omega = max(-100, min(100, omega))
-
-        slow_factor = min(1.0, distance / (self._arrival_distance * 5))
-        vx *= slow_factor
-
-        return (int(vx), int(vy), int(omega))
-
-    def is_arrived(self, tvec):
-        """Check if arrived at marker (calibrated mode)."""
-        tx, ty, tz = tvec[0], tvec[1], tvec[2]
-        distance = math.sqrt(tx * tx + tz * tz)
-        self._last_distance = distance
-        return distance <= self._arrival_distance
-
-    # --- Visual-only approach (no camera calibration needed) ---
-
-    def compute_visual_approach(self, marker, frame_width, frame_height,
-                                approach_speed=50, turn_speed=45):
-        """Compute motor command using pixel-based marker tracking.
-
-        Uses simultaneous steering + forward motion for smoother approach.
-        Applies exponential moving average to reduce jitter from frame noise.
-
-        Args:
-            marker: Dict with "center" (cx, cy) and "size" (pixels).
-            frame_width: Image width in pixels.
-            frame_height: Image height in pixels.
-            approach_speed: Forward speed when marker is centered.
-            turn_speed: Turn speed when centering marker.
+        Logic:
+        1. If marker not centered: rotate to center it (no forward motion)
+        2. If centered: drive forward, slow down as we get closer
+        3. If close enough: stop and hold distance
 
         Returns:
-            Tuple (vx, vy, omega) as ints.
-            Returns None if arrived (marker size > stop_size).
+            Tuple (vx, vy, omega) or None if arrived and holding.
+            Also returns state string for logging.
         """
-        raw_cx, raw_cy = marker["center"]
+        raw_cx, _ = marker["center"]
         raw_size = marker["size"]
 
-        # Temporal smoothing (EMA filter)
+        # Temporal smoothing
         if self._smooth_cx is None:
             self._smooth_cx = raw_cx
             self._smooth_size = raw_size
-            self._approach_start_time = time.monotonic()
         else:
             self._smooth_cx += self._alpha * (raw_cx - self._smooth_cx)
             self._smooth_size += self._alpha * (raw_size - self._smooth_size)
@@ -125,49 +63,71 @@ class ArucoApproach:
         cx = self._smooth_cx
         size = self._smooth_size
 
-        # Close enough — arrived
-        if size > self._stop_size:
-            self._reset_smoothing()
-            return None  # signal arrived
-
-        # Compute steering (proportional to horizontal offset)
+        # Center error: -1 (marker on left) to +1 (marker on right)
         cx_img = frame_width / 2.0
-        error_x = cx - cx_img
-        normalized_error = error_x / (frame_width / 2.0)  # -1 to +1
+        error_x = (cx - cx_img) / (frame_width / 2.0)
 
-        omega = int(turn_speed * normalized_error)
-        omega = max(-turn_speed, min(turn_speed, omega))
+        # Log for debugging
+        log_event(f"ARUCO: cx_err={error_x:+.2f} size={size:.0f} hold={self._holding}")
 
-        # Compute forward speed (proportional to distance estimate)
-        # Slow down as marker gets bigger (closer)
-        size_ratio = min(1.0, size / self._stop_size)
+        # === HOLD MODE: maintain distance ===
+        if self._holding:
+            if size < self.HOLD_MIN:
+                # Marker moved away — approach again
+                self._holding = False
+                log_event(f"ARUCO: marker moved away (size={size:.0f}), re-approaching")
+            elif size > self.HOLD_MAX:
+                # Too close — back up slightly
+                omega = int(-20 * error_x)  # stay centered while backing
+                log_event(f"ARUCO: too close (size={size:.0f}), backing up")
+                return (-15, 0, omega)
+            else:
+                # Good distance — just stay centered
+                if abs(error_x) > self.CENTER_TOLERANCE:
+                    omega = int(20 * error_x)
+                    return (0, 0, omega)
+                return (0, 0, 0)  # perfect — hold still
 
-        # Reduce forward speed when steering hard (prevents overshooting)
-        steer_factor = 1.0 - 0.5 * abs(normalized_error)
-        speed = max(12, int(approach_speed * (1.0 - size_ratio * 0.6) * steer_factor))
+        # === CENTERING: turn to face marker ===
+        if abs(error_x) > self.CENTER_TOLERANCE:
+            # Turn to center marker — proportional speed
+            omega = int(30 * error_x)
+            omega = max(-30, min(30, omega))
 
-        # Very close: creep speed for precise stopping
-        if size_ratio > 0.8:
+            # If very off-center, don't move forward at all
+            if abs(error_x) > 0.3:
+                log_event(f"ARUCO: centering (err={error_x:+.2f}, omega={omega})")
+                return (0, 0, omega)
+
+            # Slightly off — slow forward + steer
+            size_ratio = min(1.0, size / self.STOP_SIZE)
+            speed = max(10, int(35 * (1.0 - size_ratio * 0.6)))
+            return (speed, 0, omega)
+
+        # === APPROACH: centered, drive forward ===
+        if size > self.STOP_SIZE:
+            # Arrived — enter hold mode
+            self._holding = True
+            log_event(f"ARUCO: arrived! size={size:.0f}, entering hold mode")
+            return (0, 0, 0)
+
+        # Drive forward, speed proportional to distance
+        size_ratio = min(1.0, size / self.STOP_SIZE)
+        speed = max(12, int(40 * (1.0 - size_ratio * 0.5)))
+
+        # Creep when very close
+        if size_ratio > 0.75:
             speed = min(speed, 18)
 
-        return (speed, 0, omega)
+        log_event(f"ARUCO: approaching (speed={speed}, size_ratio={size_ratio:.2f})")
+        return (speed, 0, 0)
 
-    def is_visual_arrived(self, marker):
-        """Check if arrived at marker (visual-only mode)."""
-        return marker["size"] > self._stop_size
-
-    def _reset_smoothing(self):
-        """Reset temporal smoothing state."""
-        self._smooth_cx = None
-        self._smooth_size = None
-        self._approach_start_time = None
+    def is_holding(self):
+        """Whether we've arrived and are maintaining distance."""
+        return self._holding
 
     def reset(self):
-        """Reset approach state for a new target."""
-        self._reset_smoothing()
-        self._last_distance = None
-
-    @property
-    def last_distance(self):
-        """Last measured distance to marker, or None."""
-        return self._last_distance
+        """Reset for new target."""
+        self._smooth_cx = None
+        self._smooth_size = None
+        self._holding = False
