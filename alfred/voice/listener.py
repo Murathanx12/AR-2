@@ -296,24 +296,15 @@ class VoiceListener:
     # ---- Main loop ----
 
     def _listen_loop(self):
-        # Try engines in priority order: Google > Whisper > VOSK
-        use_google = False
+        # Try engines in priority order: Whisper > VOSK
+        # (Local-only — no cloud APIs, works offline and in China)
         use_whisper = False
         vosk_rec = None
 
-        if _HAS_GOOGLE_STT:
-            use_google = True
-            self._engine = "google"
-            print("[Voice] Google Speech Recognition selected (cloud, best accuracy)")
-            # Also init Whisper as offline fallback for network failures
-            if _HAS_WHISPER:
-                self._init_whisper()
-                print("[Voice] Whisper loaded as offline fallback")
-
-        if not use_google and _HAS_WHISPER:
+        if _HAS_WHISPER:
             use_whisper = self._init_whisper()
 
-        if not use_google and not use_whisper and _HAS_VOSK:
+        if not use_whisper and _HAS_VOSK:
             model_path = self._find_vosk_model()
             if model_path:
                 try:
@@ -328,8 +319,9 @@ class VoiceListener:
                 print("[Voice] No VOSK model found")
                 return
 
-        if not use_google and not use_whisper and vosk_rec is None:
+        if not use_whisper and vosk_rec is None:
             print("[Voice] No STT engine available")
+            print("[Voice] Install: pip install faster-whisper")
             return
 
         # Open mic
@@ -348,7 +340,7 @@ class VoiceListener:
         print(f"[Voice] Ready ({self._engine}). Say 'Hello Sonny' to wake up.")
 
         try:
-            if use_google or use_whisper:
+            if use_whisper:
                 self._vad_loop(stream, p)
             else:
                 self._vosk_loop(stream, p, vosk_rec)
@@ -433,23 +425,8 @@ class VoiceListener:
                 time.sleep(0.5)
 
     def _process_audio(self, audio_data):
-        """Transcribe audio with best available engine and process the text."""
-        text = ""
-
-        # Try Google first (most accurate)
-        if _HAS_GOOGLE_STT and self._engine == "google":
-            result = self._transcribe_google(audio_data)
-            if result is None:
-                # Network failure — fall back to Whisper
-                if _whisper_model is not None:
-                    text = self._transcribe_whisper(audio_data)
-                    if text:
-                        print(f"[Voice] Google offline, used Whisper fallback")
-            else:
-                text = result
-        else:
-            text = self._transcribe_whisper(audio_data)
-
+        """Transcribe audio with Whisper and process the text."""
+        text = self._transcribe_whisper(audio_data)
         if not text:
             return
 
