@@ -3,12 +3,14 @@ Sonny (Alfred V4) — Mecanum-wheeled robotic butler for HKU School of Innovatio
 Demo: April 24, 2026. Repo: https://github.com/Murathanx12/AR-2
 Wake phrase: "Hello Sonny" (say once, stays awake until "sleep")
 
-Known Issues (Apr 16, 2026)
+Known Issues (Apr 17, 2026)
 
 1. ESP32 motors not responding — UART connects but motors don't spin. Suspected hardware (wiring/short/battery). Run scripts/test_esp32.py to diagnose.
-2. Voice recognition — upgraded to Whisper tiny (primary) with VOSK fallback. Install: pip install faster-whisper. Phone app on port 8080 as backup.
-3. USB microphone weak — only picks up from ~30cm. Need conference mic or phone relay for demo.
-4. Obstacle detection disabled — camera-based detection had too many false positives. Only ultrasonic (when connected) triggers BLOCKED state.
+2. USB microphone weak — only picks up from ~30cm. Threshold lowered to 1.5x noise floor. Need conference mic or phone relay for demo.
+3. Obstacle detection disabled — camera-based detection had too many false positives. Only ultrasonic (when connected) triggers BLOCKED state.
+4. MediaPipe not installed on Pi — person/gesture detection unavailable. Install: pip install mediapipe
+5. OpenCV ArUco API — Pi has older OpenCV, code supports both old and new API. If ArUco fails, check cv2 version.
+6. USB hub power — camera and mic must be plugged directly into Pi USB ports, NOT through the USB hub. WiFi adapter and speaker can stay on hub.
 
 Architecture
 
@@ -18,6 +20,15 @@ Raspberry Pi 5: Decision engine. Python. FSM + vision + voice + expression.
 UART: 115200 baud on /dev/ttyAMA2. Pi sends mv_vector:vx,vy,omega\n, ESP sends IR_STATUS:XX\n and DIST:XX.X\n.
 Mecanum IK: FL=vx+vy+omega, FR=vx-vy-omega, RL=vx-vy+omega, RR=vx+vy-omega. PWM 50-200 from 0-100%.
 Wiring: See docs/WIRING.md for complete pin map.
+
+Network / VPN
+
+- Windscribe VPN via OpenVPN (Singapore) — required for Claude API and Google STT in HK/China
+- Config: /etc/openvpn/windscribe.conf, auth: /etc/openvpn/windscribe-auth.txt
+- Connect: sudo openvpn --config /etc/openvpn/windscribe.conf --daemon
+- Disconnect: sudo killall openvpn
+- Verify: curl -s https://ipinfo.io/country (should show SG)
+- Cloudflare WARP also installed but conflicts with Claude Code — use Windscribe instead
 
 Hardware Inventory
 
@@ -48,29 +59,44 @@ On-robot peripherals:
 
 Competition Requirements (Minilab 6 / Project Alfred)
 
-R1: Voice commands — wake phrase "Hello Sonny", FOLLOW TRACK, GO TO QR CODE. VOSK STT + exact keyword matching. ✅ (code done, accuracy needs improvement)
+R1: Voice commands — wake phrase "Hello Sonny", FOLLOW TRACK, GO TO QR CODE. Google STT (primary) + Whisper tiny (offline fallback) + exact keyword matching. ✅ (code done, testing needed)
 R2: Line-following delivery. IR sensors + weighted algorithmic control. ✅ (code done, needs ESP32 hardware fix)
 R3: ArUco marker approach. Visual-only with EMA smoothing + simultaneous steer/drive. ✅ (code done, needs ESP32)
 R4: Obstacle detection — ultrasonic HC-SR04 only (camera detection disabled — too many false positives). ✅ (code done, needs ultrasonic wired)
-R5: Intention indicators — NeoPixel LEDs per state, TTS (espeak-ng), buzzer, OLED eyes, 14" screen GUI. ✅
-EC1: Gesture recognition — MediaPipe hands, 6 gestures, gesture→action in patrol. ✅
-EC3: Claude API butler conversation — claude-haiku-4-5 with personality. ✅ (needs ANTHROPIC_API_KEY)
+R5: Intention indicators — NeoPixel LEDs per state, TTS (piper/espeak-ng), buzzer, OLED eyes, 14" screen GUI. ✅
+EC1: Gesture recognition — MediaPipe hands, 6 gestures, gesture→action in patrol. ✅ (needs mediapipe install)
+EC3: Claude API butler conversation — claude-haiku-4-5 with personality. ✅ (needs ANTHROPIC_API_KEY + VPN)
 EC5: Butler personality — 8 emotions, animated eyes, head tracking. ✅
 
 Voice System Design
 
-- Primary STT: Whisper tiny (faster-whisper, ~80% accuracy, handles accents well)
-- Fallback STT: VOSK grammar-constrained (if Whisper not installed)
+- Primary STT: Google Speech Recognition (cloud, best accuracy for accented English, free API)
+- Offline fallback: Whisper tiny (faster-whisper, ~80% accuracy) — auto-used when network fails
+- Legacy fallback: VOSK grammar-constrained (if neither Google nor Whisper available)
 - Energy-based VAD detects when you stop speaking, then transcribes complete utterance
+- Noise calibration at startup — threshold = 1.5x ambient noise floor
 - Wake word: "Hello Sonny" (also accepts "hello sunny", "hello sony", "hey sonny", bare "hello")
 - Say wake word ONCE — robot stays awake. All subsequent speech = commands.
 - "stop" always works from any state, even before wake word
 - "sleep" requires wake word again
 - Mic mutes during TTS to prevent echo loop (speaker → mic → false command)
 - Intent classifier: exact keyword match only. No fuzzy, no confirmation dialogs.
-- Phone web controller (port 8080) as backup — uses phone's browser STT for best accuracy
-- Install Whisper: pip install faster-whisper (downloads ~75MB tiny.en model on first run)
-- Install VOSK fallback: pip install vosk + download vosk-model-small-en-us-0.15
+- Install: pip install SpeechRecognition faster-whisper
+
+Camera System
+
+- USB camera auto-detected (scans indices 0-9, uses V4L2 backend to avoid GStreamer issues)
+- Native resolution: 1920x1080 (set in config.py VisionConfig)
+- Camera MUST be plugged directly into Pi USB port (not through hub — causes power/bandwidth issues)
+- ArUco: DICT_4X4_50, supports both old and new OpenCV API
+
+GUI System
+
+- Pygame fullscreen GUI with --fullscreen flag (or F11 to toggle)
+- Camera feed with ArUco/face/obstacle overlays
+- Clickable command buttons as voice fallback (Wake Up, Follow Track, Dance, Stop, etc.)
+- Keyboard controls: WASD=move, QE=turn, Space=emergency stop, M=mode, 1/2=speed
+- Web dashboard also available at http://<pi-ip>:8080 with keyboard drive (WASD+QE+Space)
 
 UART Protocol (Pi → ESP32)
 
@@ -91,27 +117,38 @@ DIST:XX.X (ultrasonic cm, 10Hz)
 
 V4 Modules
 
-alfred/config.py — All params as frozen dataclasses. AlfredConfig singleton.
+alfred/config.py — All params as frozen dataclasses. AlfredConfig singleton. Camera index auto-detected, resolution 1920x1080.
 alfred/comms/ — protocol.py (pure cmd_* formatters), uart.py (UARTBridge, prints connection status).
 alfred/navigation/ — line_follower.py (weighted algo), aruco_approach.py (visual-only + EMA smoothing), obstacle_avoider, patrol.
-alfred/vision/ — camera, aruco (DICT_4X4_50), obstacle (contour), person (MediaPipe face+hand+gesture), BEV, course_mapper.
-alfred/voice/ — listener.py (Whisper tiny primary + VOSK fallback, VAD, wake-once, mic mute), intent.py (exact keyword match), speaker.py (espeak-ng TTS), conversation.py (Claude API EC3).
+alfred/vision/ — camera (auto-detect V4L2), aruco (DICT_4X4_50, dual API), obstacle (contour), person (MediaPipe face+hand+gesture), BEV, course_mapper.
+alfred/voice/ — listener.py (Google STT primary + Whisper fallback + VOSK, VAD, wake-once, mic mute), intent.py (exact keyword match), speaker.py (piper/espeak-ng TTS), conversation.py (Claude API EC3).
 alfred/expression/ — eyes.py (8 emotions, gaze, auto-blink), leds.py (NeoPixel), head.py (PCA9685 servo), personality.py (state→expression, 10Hz).
-alfred/fsm/ — states.py (17-state IntEnum), controller.py (30Hz dispatch).
-alfred/gui/ — debug_gui.py (1280x720 Pygame: eyes, camera+overlays, IR, vector, voice I/O, gestures, event log).
-alfred/web/ — app.py (Flask dashboard: live camera MJPEG, all sensors, voice I/O, manual drive, command buttons, event log).
+alfred/fsm/ — states.py (17-state IntEnum), controller.py (30Hz dispatch, dance music via ffplay).
+alfred/gui/ — debug_gui.py (Pygame fullscreen: eyes, camera+overlays, IR, vector, voice I/O, command buttons, event log).
+alfred/web/ — app.py (Flask dashboard: live camera MJPEG, all sensors, voice I/O, keyboard drive WASD, event log).
 alfred/utils/ — logging (colored), timing (RateTimer, Stopwatch).
+
+Logging
+
+- Detailed log files in logs/sonny_YYYYMMDD_HHMMSS.log
+- All voice transcriptions, intent classifications, state transitions, errors logged with timestamps
+- Send log file to Claude for debugging
 
 Key Commands
 ```bash
-# Build ESP32 firmware (from Windows PC)
-cd esp32 && pio run --target upload
+# Connect VPN (required for Claude API / Google STT)
+sudo openvpn --config /etc/openvpn/windscribe.conf --daemon
 
 # Run Sonny V4 (on Raspberry Pi)
-python3 Minilab5/alfred.py              # full GUI
-python3 Minilab5/alfred.py --headless   # terminal dashboard
-python3 Minilab5/alfred.py --no-voice   # skip voice
-python3 Minilab5/alfred.py --no-camera  # skip camera
+cd ~/AR-2 && source .venv/bin/activate
+python3 Minilab5/alfred.py --fullscreen    # fullscreen GUI on Pi monitor
+python3 Minilab5/alfred.py                 # windowed GUI
+python3 Minilab5/alfred.py --headless      # terminal dashboard
+python3 Minilab5/alfred.py --no-voice      # skip voice
+python3 Minilab5/alfred.py --no-camera     # skip camera
+
+# Build ESP32 firmware (from Windows PC)
+cd esp32 && pio run --target upload
 
 # Diagnose ESP32 connection
 python3 scripts/test_esp32.py
@@ -122,4 +159,7 @@ python -m pytest tests/
 # Test individual modules
 python3 scripts/test_aruco.py
 python3 scripts/calibrate_bev.py
+
+# Read latest log
+cat ~/AR-2/logs/$(ls -t ~/AR-2/logs/ | head -1)
 ```
