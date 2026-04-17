@@ -97,7 +97,7 @@ class ConversationEngine:
                 self._history = self._history[-6:]
 
             response = self._client.messages.create(
-                model="claude-opus-4-6",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=100,
                 system=self.SYSTEM_PROMPT,
                 messages=self._history,
