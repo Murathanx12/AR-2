@@ -1,11 +1,13 @@
-"""Voice listener — speech-to-text with Whisper (primary) or VOSK (fallback).
+"""Voice listener — speech-to-text with Google STT (primary), Whisper (fallback), or VOSK.
 
-Whisper tiny is far more accurate than VOSK for accented English.
-Falls back to VOSK grammar-constrained mode if Whisper is not installed.
+Priority order:
+1. Google Speech Recognition (cloud, most accurate, handles accents)
+2. Whisper tiny (offline, good accuracy)
+3. VOSK (offline, grammar-constrained, lowest accuracy)
 
 Design:
 - Record audio, detect silence (energy-based VAD)
-- Send complete utterance to Whisper/VOSK for transcription
+- Send complete utterance to STT engine for transcription
 - Wake word "Hello Sonny" only needed once, then stays awake
 - "stop" always works, even before wake
 - Mic mutes during TTS to prevent echo
@@ -29,7 +31,16 @@ try:
 except (ImportError, OSError):
     _HAS_PYAUDIO = False
 
-# Try Whisper first (primary — better accuracy)
+# Google Speech Recognition (best accuracy for accented English)
+_HAS_GOOGLE_STT = False
+try:
+    import speech_recognition as sr
+    _HAS_GOOGLE_STT = True
+    logger.info("Google Speech Recognition available")
+except ImportError:
+    pass
+
+# Try Whisper (secondary — offline fallback)
 _HAS_WHISPER = False
 _whisper_model = None
 try:
@@ -162,6 +173,22 @@ class VoiceListener:
         with self._lock:
             return self._awake
 
+    # ---- Google STT ----
+
+    def _transcribe_google(self, audio_data):
+        """Transcribe audio bytes using Google Speech Recognition. Returns text string."""
+        recognizer = sr.Recognizer()
+        # Convert raw PCM to AudioData for speech_recognition
+        audio = sr.AudioData(audio_data, self.SAMPLE_RATE, 2)  # 16-bit = 2 bytes
+        try:
+            text = recognizer.recognize_google(audio, language="en-US")
+            return text.lower().strip()
+        except sr.UnknownValueError:
+            return ""
+        except sr.RequestError as e:
+            print(f"[Voice] Google STT network error: {e}")
+            return None  # None = network failure, trigger fallback
+
     # ---- Whisper setup ----
 
     def _init_whisper(self):
@@ -269,14 +296,24 @@ class VoiceListener:
     # ---- Main loop ----
 
     def _listen_loop(self):
-        # Try Whisper first, fall back to VOSK
+        # Try engines in priority order: Google > Whisper > VOSK
+        use_google = False
         use_whisper = False
         vosk_rec = None
 
-        if _HAS_WHISPER:
+        if _HAS_GOOGLE_STT:
+            use_google = True
+            self._engine = "google"
+            print("[Voice] Google Speech Recognition selected (cloud, best accuracy)")
+            # Also init Whisper as offline fallback for network failures
+            if _HAS_WHISPER:
+                self._init_whisper()
+                print("[Voice] Whisper loaded as offline fallback")
+
+        if not use_google and _HAS_WHISPER:
             use_whisper = self._init_whisper()
 
-        if not use_whisper and _HAS_VOSK:
+        if not use_google and not use_whisper and _HAS_VOSK:
             model_path = self._find_vosk_model()
             if model_path:
                 try:
@@ -291,7 +328,7 @@ class VoiceListener:
                 print("[Voice] No VOSK model found")
                 return
 
-        if not use_whisper and vosk_rec is None:
+        if not use_google and not use_whisper and vosk_rec is None:
             print("[Voice] No STT engine available")
             return
 
@@ -311,8 +348,8 @@ class VoiceListener:
         print(f"[Voice] Ready ({self._engine}). Say 'Hello Sonny' to wake up.")
 
         try:
-            if use_whisper:
-                self._whisper_loop(stream, p)
+            if use_google or use_whisper:
+                self._vad_loop(stream, p)
             else:
                 self._vosk_loop(stream, p, vosk_rec)
         finally:
@@ -321,8 +358,8 @@ class VoiceListener:
             p.terminate()
             print("[Voice] Listener stopped")
 
-    def _whisper_loop(self, stream, pyaudio_instance):
-        """Main loop using Whisper with energy-based VAD + noise calibration."""
+    def _vad_loop(self, stream, pyaudio_instance):
+        """Main loop using energy-based VAD + noise calibration. Works with Google/Whisper."""
         # Calibrate noise floor for 1 second at startup
         print("[Voice] Calibrating noise level (1 second)...")
         noise_samples = []
@@ -396,8 +433,23 @@ class VoiceListener:
                 time.sleep(0.5)
 
     def _process_audio(self, audio_data):
-        """Transcribe audio with Whisper and process the text."""
-        text = self._transcribe_whisper(audio_data)
+        """Transcribe audio with best available engine and process the text."""
+        text = ""
+
+        # Try Google first (most accurate)
+        if _HAS_GOOGLE_STT and self._engine == "google":
+            result = self._transcribe_google(audio_data)
+            if result is None:
+                # Network failure — fall back to Whisper
+                if _whisper_model is not None:
+                    text = self._transcribe_whisper(audio_data)
+                    if text:
+                        print(f"[Voice] Google offline, used Whisper fallback")
+            else:
+                text = result
+        else:
+            text = self._transcribe_whisper(audio_data)
+
         if not text:
             return
 
@@ -417,7 +469,7 @@ class VoiceListener:
         with self._lock:
             self._last_text = text
 
-        print(f"[Voice|Whisper] '{text}'")
+        print(f"[Voice|{self._engine}] '{text}'")
         self._process(text)
 
     def _vosk_loop(self, stream, pyaudio_instance, rec):
