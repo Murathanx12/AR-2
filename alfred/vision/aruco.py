@@ -53,8 +53,15 @@ class ArucoDetector:
         if _HAS_CV2:
             dict_id = _ARUCO_DICTS.get(dict_name, cv2.aruco.DICT_4X4_50)
             self._dictionary = cv2.aruco.getPredefinedDictionary(dict_id)
-            self._parameters = cv2.aruco.DetectorParameters()
-            self._detector = cv2.aruco.ArucoDetector(self._dictionary, self._parameters)
+            # Support both old and new OpenCV ArUco API
+            if hasattr(cv2.aruco, 'ArucoDetector'):
+                # OpenCV 4.7+
+                self._parameters = cv2.aruco.DetectorParameters()
+                self._detector = cv2.aruco.ArucoDetector(self._dictionary, self._parameters)
+            else:
+                # OpenCV 4.6 and older
+                self._parameters = cv2.aruco.DetectorParameters_create()
+                self._detector = None  # use legacy detectMarkers
 
     def detect(self, frame):
         """Detect ArUco markers in a frame.
@@ -66,11 +73,16 @@ class ArucoDetector:
             List of dicts with center and size for visual approach:
             [{"id": int, "corners": ndarray(4,2), "center": (cx,cy), "size": float}, ...]
         """
-        if not _HAS_CV2 or self._detector is None:
+        if not _HAS_CV2 or self._dictionary is None:
             return []
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
-        corners, ids, rejected = self._detector.detectMarkers(gray)
+        if self._detector is not None:
+            corners, ids, rejected = self._detector.detectMarkers(gray)
+        else:
+            # Legacy API (OpenCV < 4.7)
+            corners, ids, rejected = cv2.aruco.detectMarkers(
+                gray, self._dictionary, parameters=self._parameters)
 
         results = []
         if ids is not None:

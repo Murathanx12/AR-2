@@ -31,17 +31,18 @@ class CameraManager:
             return False
 
         # Try configured index first, then auto-scan
+        # Force V4L2 backend to avoid GStreamer issues on Pi
         indices = [self.camera_index] + [i for i in range(10) if i != self.camera_index]
         for idx in indices:
-            cap = cv2.VideoCapture(idx)
+            cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
             if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
+                cap.set(cv2.CAP_PROP_FPS, self.fps)
                 ret, frame = cap.read()
                 if ret and frame is not None:
                     self._cap = cap
                     self.camera_index = idx
-                    self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
-                    self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
-                    self._cap.set(cv2.CAP_PROP_FPS, self.fps)
                     actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                     actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                     logger.info(f"Camera opened on index {idx} at {actual_w}x{actual_h}")
