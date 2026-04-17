@@ -65,7 +65,7 @@ R3: ArUco marker approach. Visual-only with EMA smoothing + simultaneous steer/d
 R4: Obstacle detection — ultrasonic HC-SR04 only (camera detection disabled — too many false positives). ✅ (code done, needs ultrasonic wired)
 R5: Intention indicators — NeoPixel LEDs per state, TTS (piper/espeak-ng), buzzer, OLED eyes, 14" screen GUI. ✅
 EC1: Gesture recognition — MediaPipe hands, 6 gestures, gesture→action in patrol. ✅ (needs mediapipe install)
-EC3: Claude API butler conversation — claude-haiku-4-5 with personality. ✅ (needs ANTHROPIC_API_KEY + VPN)
+EC3: Claude API butler conversation — claude-opus-4-6 with personality. ✅ (needs ANTHROPIC_API_KEY + VPN)
 EC5: Butler personality — 8 emotions, animated eyes, head tracking. ✅
 
 Voice System Design
