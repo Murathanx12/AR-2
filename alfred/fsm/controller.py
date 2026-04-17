@@ -299,6 +299,7 @@ class AlfredFSM:
             return
         old_name = STATE_NAMES[self.state]
         new_name = STATE_NAMES[new_state]
+        logger.info(f"STATE {old_name} -> {new_name}")
         print(f"[FSM] {old_name} -> {new_name}")
 
         self._previous_state = self.state
@@ -388,6 +389,7 @@ class AlfredFSM:
             return
 
         intent, confidence = self.intent_classifier.classify(text)
+        logger.info(f"VOICE '{text}' -> intent={intent} conf={confidence:.0%}")
         print(f"[Voice] '{text}' -> {intent} ({confidence:.0%})")
 
         if self.gui:

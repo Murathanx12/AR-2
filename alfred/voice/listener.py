@@ -469,6 +469,7 @@ class VoiceListener:
         with self._lock:
             self._last_text = text
 
+        logger.info(f"STT ({self._engine}): '{text}'")
         print(f"[Voice|{self._engine}] '{text}'")
         self._process(text)
 

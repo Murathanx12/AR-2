@@ -97,13 +97,29 @@ class DebugGUI:
     └──────────────────────────────────────────────┘
     """
 
-    def __init__(self, fsm=None, width=900, height=600):
+    # Voice command buttons — label, command text, color
+    CMD_BUTTONS = [
+        ("Wake Up",     "hello sonny",          (30, 100, 250)),
+        ("Follow Track","follow track",         (0, 180, 80)),
+        ("Any Marker",  "follow the marker",    (200, 160, 0)),
+        ("Go Marker 8", "go to marker 8",       (200, 130, 0)),
+        ("Follow Me",   "come here",            (140, 80, 220)),
+        ("Dance",       "dance",                (220, 50, 180)),
+        ("Patrol",      "patrol",               (0, 180, 80)),
+        ("Photo",       "photo",                (200, 200, 0)),
+        ("Search",      "search",               (0, 160, 200)),
+        ("Sleep",       "sleep",                (80, 80, 100)),
+        ("STOP",        "stop",                 (220, 40, 40)),
+    ]
+
+    def __init__(self, fsm=None, width=900, height=600, fullscreen=False):
         if not _HAS_PYGAME:
             raise RuntimeError("pygame is required for GUI")
 
         self.fsm = fsm
         self.W = width
         self.H = height
+        self._fullscreen = fullscreen
         self._running = False
         self._screen = None
         self._clock = None
@@ -131,11 +147,17 @@ class DebugGUI:
         self._detected_markers = []
         self._face_count = 0
         self._hand_count = 0
+        self._btn_rects = []  # (pygame.Rect, command_text) for click detection
 
     def start(self):
         pygame.init()
-        # Go fullscreen on the available display
-        self._screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
+        if self._fullscreen:
+            info = pygame.display.Info()
+            self.W, self.H = info.current_w, info.current_h
+            self._screen = pygame.display.set_mode((self.W, self.H), pygame.FULLSCREEN)
+            pygame.mouse.set_visible(True)
+        else:
+            self._screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
         pygame.display.set_caption("SONNY — Project Alfred Dashboard")
         self._clock = pygame.time.Clock()
 
@@ -261,6 +283,8 @@ class DebugGUI:
                 self._handle_keydown(event.key)
             elif event.type == pygame.KEYUP:
                 self._handle_keyup(event.key)
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                self._handle_click(event.pos)
             elif event.type == pygame.VIDEORESIZE:
                 self.W, self.H = event.w, event.h
                 self._screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
@@ -473,7 +497,7 @@ class DebugGUI:
         self._screen.blit(self._fonts['mono'].render(f"vy:   {debug_vy:+4d}", True, (100, 160, 255)), (tx, vec_y + 42))
         self._screen.blit(self._fonts['mono'].render(f"omega:{debug_omega:+4d}", True, (220, 180, 60)), (tx, vec_y + 64))
 
-        # ============ BOTTOM: Voice I/O + Gesture + Log ============
+        # ============ BOTTOM: Voice I/O + Commands + Log ============
         bot_y = HEADER_H + PAD + MIDDLE_H + PAD
         bot_h = BOTTOM_H - PAD
 
@@ -487,51 +511,69 @@ class DebugGUI:
         self._screen.blit(self._fonts['sm'].render("VOICE INPUT", True, DIM), (c1x + 10, bot_y + 6))
 
         if self._voice_input and now - self._voice_input_time < 10:
-            # What was heard
             heard = self._fonts['md'].render(f'"{self._voice_input}"', True, (0, 200, 255))
             self._screen.blit(heard, (c1x + 10, bot_y + 30))
-            # Intent classification
             if self._last_intent:
                 intent_color = (0, 220, 100) if self._last_confidence > 0.8 else (220, 180, 0)
                 self._screen.blit(self._fonts['sm'].render(
                     f"Intent: {self._last_intent} ({self._last_confidence:.0%})", True, intent_color),
                     (c1x + 10, bot_y + 58))
+            # Detection + gesture summary
+            det_items = []
+            if self._face_count: det_items.append(f"Faces:{self._face_count}")
+            if self._hand_count: det_items.append(f"Hands:{self._hand_count}")
+            if self._last_gesture and now - self._gesture_time < 5:
+                det_items.append(f"Gesture:{self._last_gesture}")
+            if self._detected_markers:
+                det_items.append("Markers:" + ",".join(str(m["id"]) for m in self._detected_markers))
+            if det_items:
+                self._screen.blit(self._fonts['xs'].render("  ".join(det_items), True, (100, 180, 100)),
+                                (c1x + 10, bot_y + bot_h - 22))
         else:
-            self._screen.blit(self._fonts['sm'].render("Waiting for voice...", True, (50, 55, 65)),
+            engine = "none"
+            if self.fsm and self.fsm.voice_listener:
+                engine = self.fsm.voice_listener.engine
+            self._screen.blit(self._fonts['sm'].render(f"Waiting for voice... ({engine})", True, (50, 55, 65)),
                             (c1x + 10, bot_y + 40))
 
-        # -- Voice Output + Gesture --
+        # -- Command Buttons (clickable fallback for voice) --
         c2x = c1x + col_w + PAD
         pygame.draw.rect(self._screen, PANEL, (c2x, bot_y, col_w, bot_h), border_radius=10)
         pygame.draw.rect(self._screen, BORDER, (c2x, bot_y, col_w, bot_h), 1, border_radius=10)
-        self._screen.blit(self._fonts['sm'].render("OUTPUT / GESTURE", True, DIM), (c2x + 10, bot_y + 6))
+        self._screen.blit(self._fonts['xs'].render("COMMANDS (click or use voice)", True, DIM), (c2x + 8, bot_y + 4))
 
-        if self._voice_output and now - self._voice_output_time < 8:
-            self._screen.blit(self._fonts['md'].render(f'"{self._voice_output}"', True, (100, 255, 150)),
-                            (c2x + 10, bot_y + 30))
+        self._btn_rects = []
+        btn_cols = 4
+        btn_rows = 3
+        btn_pad = 3
+        btn_area_x = c2x + 6
+        btn_area_y = bot_y + 22
+        btn_area_w = col_w - 12
+        btn_area_h = bot_h - 28
+        bw = (btn_area_w - btn_pad * (btn_cols - 1)) // btn_cols
+        bh = (btn_area_h - btn_pad * (btn_rows - 1)) // btn_rows
 
-        if self._last_gesture and now - self._gesture_time < 5:
-            gesture_icon = {"fist": "✊", "open": "🖐", "thumbs_up": "👍", "peace": "✌",
-                           "point": "👆", "wave": "👋"}.get(self._last_gesture, "?")
-            self._screen.blit(self._fonts['lg'].render(
-                f"{self._last_gesture.upper()}", True, (255, 200, 50)),
-                (c2x + 10, bot_y + 60))
+        for idx, (label, cmd_text, color) in enumerate(self.CMD_BUTTONS):
+            row = idx // btn_cols
+            col = idx % btn_cols
+            if row >= btn_rows:
+                break
+            bx = btn_area_x + col * (bw + btn_pad)
+            by = btn_area_y + row * (bh + btn_pad)
+            # STOP button spans 2 columns if it's the last one
+            this_bw = bw
+            if label == "STOP":
+                this_bw = bw
+            rect = pygame.Rect(bx, by, this_bw, bh)
+            self._btn_rects.append((rect, cmd_text))
 
-        if self._detected_markers:
-            marker_str = "Markers: " + ", ".join(f"ID:{m['id']}" for m in self._detected_markers)
-            self._screen.blit(self._fonts['sm'].render(marker_str, True, (0, 255, 100)),
-                            (c2x + 10, bot_y + 92))
-
-        # Detection summary
-        det_y = bot_y + bot_h - 24
-        det_items = []
-        if self._face_count:
-            det_items.append(f"Faces:{self._face_count}")
-        if self._hand_count:
-            det_items.append(f"Hands:{self._hand_count}")
-        if det_items:
-            self._screen.blit(self._fonts['xs'].render("  ".join(det_items), True, (100, 180, 100)),
-                            (c2x + 10, det_y))
+            # Draw button
+            pygame.draw.rect(self._screen, color, rect, border_radius=5)
+            pygame.draw.rect(self._screen, (min(255, color[0]+40), min(255, color[1]+40), min(255, color[2]+40)),
+                           rect, 1, border_radius=5)
+            lbl = self._fonts['xs'].render(label, True, (255, 255, 255))
+            self._screen.blit(lbl, (bx + (this_bw - lbl.get_width()) // 2,
+                                    by + (bh - lbl.get_height()) // 2))
 
         # -- Event Log --
         c3x = c2x + col_w + PAD
@@ -543,13 +585,17 @@ class DebugGUI:
         log_y = bot_y + 26
         for ts, msg in self._event_log[-7:]:
             line = f"{ts} {msg}"
-            # Truncate if too long
             if self._fonts['mono_sm'].size(line)[0] > c3w - 20:
                 while self._fonts['mono_sm'].size(line + "...")[0] > c3w - 20 and len(line) > 10:
                     line = line[:-1]
                 line += "..."
             self._screen.blit(self._fonts['mono_sm'].render(line, True, (100, 105, 120)), (c3x + 10, log_y))
             log_y += 17
+
+        # Keyboard hint at bottom
+        hint = self._fonts['xs'].render(
+            "WASD=move  QE=turn  Space=STOP  M=mode  F11=fullscreen  1/2=speed  ESC=quit", True, (50, 55, 65))
+        self._screen.blit(hint, (PAD + 10, H - 18))
 
         pygame.display.flip()
         self._clock.tick(30)
@@ -574,6 +620,24 @@ class DebugGUI:
             pygame.draw.ellipse(self._screen, sc, (cx - ew // 2, cy - eh // 2, ew, eh))
             pr = max(5, min(ew, eh) // 5)
             pygame.draw.ellipse(self._screen, (16, 18, 24), (cx - pr, cy - pr, pr * 2, pr * 2))
+
+    def _handle_click(self, pos):
+        """Handle mouse click on command buttons."""
+        for rect, cmd_text in self._btn_rects:
+            if rect.collidepoint(pos):
+                self._log(f"Button: {cmd_text}")
+                if self.fsm:
+                    self.fsm._on_voice_command(cmd_text)
+                    # Wake up if needed
+                    if self.fsm.voice_listener and not self.fsm.voice_listener.is_awake:
+                        from alfred.voice.listener import WAKE_VARIANTS
+                        for wake in WAKE_VARIANTS:
+                            if wake in cmd_text.lower():
+                                self.fsm.voice_listener._do_wake(
+                                    cmd_text.lower().split(wake, 1)[-1].strip()
+                                )
+                                break
+                break
 
     def _handle_keydown(self, key):
         from alfred.comms.protocol import cmd_vector, cmd_stop

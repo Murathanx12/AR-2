@@ -14,12 +14,43 @@ import argparse
 import sys
 import os
 import time
+import logging
 
 # Ensure project root is on sys.path so alfred package is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from alfred.config import CONFIG
 from alfred.fsm.controller import AlfredFSM
+
+
+def setup_logging():
+    """Set up detailed file logging for all subsystems."""
+    log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, f"sonny_{time.strftime('%Y%m%d_%H%M%S')}.log")
+
+    # Root logger — captures everything
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    # File handler — detailed
+    fh = logging.FileHandler(log_path, encoding='utf-8')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        '%(asctime)s | %(levelname)-5s | %(name)-20s | %(message)s',
+        datefmt='%H:%M:%S.%f'
+    ))
+    root.addHandler(fh)
+
+    # Console handler — info only
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter('%(message)s'))
+    root.addHandler(ch)
+
+    # Also redirect print-style logs
+    print(f"[Log] Detailed log: {log_path}")
+    return log_path
 
 
 def run_vision_test():
@@ -250,6 +281,7 @@ def _print_dashboard(fsm, event_log):
 def main():
     parser = argparse.ArgumentParser(description="Sonny V4 — Alfred Robotic Butler")
     parser.add_argument("--headless", action="store_true", help="Run without GUI")
+    parser.add_argument("--fullscreen", action="store_true", help="Start GUI in fullscreen mode")
     parser.add_argument("--no-voice", action="store_true", help="Skip voice subsystem")
     parser.add_argument("--no-camera", action="store_true", help="Skip camera subsystem")
     parser.add_argument("--no-web", action="store_true", help="Skip phone web controller")
@@ -262,6 +294,7 @@ def main():
                         help=f"Override default speed (default: {CONFIG.speed.default_speed})")
     args = parser.parse_args()
 
+    log_path = setup_logging()
     print("Sonny V4 — Alfred Robotic Butler")
 
     if args.test_vision:
@@ -331,10 +364,11 @@ def main():
     if not args.headless:
         try:
             from alfred.gui.debug_gui import DebugGUI
-            gui = DebugGUI(fsm=fsm)
+            gui = DebugGUI(fsm=fsm, fullscreen=args.fullscreen)
             gui.start()
             fsm.set_gui(gui)
-            print("GUI started. Press M for auto/manual, F for follow, ESC to quit.")
+            print("GUI started. WASD=move QE=turn Space=STOP M=mode F11=fullscreen ESC=quit")
+            print("Click command buttons if voice fails.")
         except Exception as e:
             print(f"GUI unavailable ({e}), running headless")
             gui = None
