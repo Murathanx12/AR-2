@@ -103,7 +103,7 @@ class VoiceListener:
 
     SAMPLE_RATE = 16000
     CHUNK_SIZE = 1024         # ~64ms per chunk at 16kHz
-    SILENCE_THRESHOLD = 1000  # RMS energy below this = silence (high = ignore background noise)
+    SILENCE_THRESHOLD = 500   # RMS energy below this = silence (lowered for weak USB mics)
     SILENCE_DURATION = 0.5    # seconds of silence to end utterance
     MIN_SPEECH_DURATION = 0.3 # minimum speech to process (ignore clicks/noise)
     MAX_SPEECH_DURATION = 5   # max 5 seconds per utterance (commands are short)
@@ -363,8 +363,8 @@ class VoiceListener:
                 pass
         if noise_samples:
             avg_noise = sum(noise_samples) / len(noise_samples)
-            # Set threshold to 2x average noise (must speak louder than background)
-            self.SILENCE_THRESHOLD = max(600, int(avg_noise * 2.5))
+            # Set threshold to 1.5x average noise — low enough for weak USB mics
+            self.SILENCE_THRESHOLD = max(300, int(avg_noise * 1.5))
             print(f"[Voice] Noise floor: {avg_noise:.0f} RMS, threshold set to: {self.SILENCE_THRESHOLD}")
         else:
             print(f"[Voice] Using default threshold: {self.SILENCE_THRESHOLD}")

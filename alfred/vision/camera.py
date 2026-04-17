@@ -22,20 +22,39 @@ class CameraManager:
         self._cap = None
 
     def open(self):
-        """Open the camera device and configure resolution/fps."""
+        """Open the camera device and configure resolution/fps.
+
+        If the configured index fails, auto-scans indices 0-9 to find a working camera.
+        """
         if not _HAS_CV2:
             logger.error("Cannot open camera: OpenCV not available")
             return False
-        self._cap = cv2.VideoCapture(self.camera_index)
-        if not self._cap.isOpened():
-            logger.error(f"Failed to open camera index {self.camera_index}")
-            self._cap = None
-            return False
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
-        self._cap.set(cv2.CAP_PROP_FPS, self.fps)
-        logger.info(f"Camera {self.camera_index} opened at {self.resolution}")
-        return True
+
+        # Try configured index first, then auto-scan
+        indices = [self.camera_index] + [i for i in range(10) if i != self.camera_index]
+        for idx in indices:
+            cap = cv2.VideoCapture(idx)
+            if cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    self._cap = cap
+                    self.camera_index = idx
+                    self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
+                    self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
+                    self._cap.set(cv2.CAP_PROP_FPS, self.fps)
+                    actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    logger.info(f"Camera opened on index {idx} at {actual_w}x{actual_h}")
+                    print(f"[Camera] Opened on index {idx} at {actual_w}x{actual_h}")
+                    return True
+                cap.release()
+            else:
+                cap.release()
+
+        print("[Camera] No working camera found (tried indices 0-9)")
+        logger.error("No working camera found")
+        self._cap = None
+        return False
 
     def read_frame(self):
         """Read a single frame. Returns numpy array or None on failure."""
