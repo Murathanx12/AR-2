@@ -1,20 +1,34 @@
-"""Conversation engine — Claude API integration for natural butler dialogue (EC3).
+"""Conversation engine — OpenAI GPT-4o-mini for natural butler dialogue (EC3).
 
-Pipes VOSK-recognised text to Claude API for butler-style responses,
-then speaks the response via TTS. Requires WiFi and ANTHROPIC_API_KEY.
+Routes unknown/uncertain voice commands to GPT for butler-style responses.
+Also handles "did you mean X?" confirmation when intent confidence is low.
 """
 
 import threading
 import logging
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 logger = logging.getLogger(__name__)
 
+_openai_client = None
+try:
+    from openai import OpenAI
+    _key = os.environ.get("OPENAI_API_KEY")
+    if _key:
+        _openai_client = OpenAI(api_key=_key)
+except ImportError:
+    pass
+
 
 class ConversationEngine:
-    """Natural language conversation using Claude API.
+    """Natural language conversation using OpenAI GPT-4o-mini.
 
-    Falls back to canned responses if API is unavailable.
+    Falls back to polite rephrasing prompts if API is unavailable.
     """
 
     SYSTEM_PROMPT = (
@@ -23,62 +37,46 @@ class ConversationEngine:
         "You are charming, witty, and speak with understated British butler formality "
         "(think Alfred Pennyworth meets a friendly modern robot). "
         "Keep responses to 1-2 short sentences — you speak aloud via TTS so brevity matters. "
-        "Your capabilities: follow floor tracks for food delivery, navigate to ArUco markers, "
+        "Your capabilities: follow floor tracks for food delivery, navigate to ArUco markers "
+        "(say 'go to marker' followed by a number 1 to 50), "
         "detect obstacles with ultrasonic sensors, dance, take photos, patrol areas, "
         "recognize hand gestures, and track faces. You have mecanum wheels for omnidirectional movement. "
-        "You understand English and Turkish. "
         "If someone asks about food or drinks, play along — you are a butler at a reception party. "
-        "Show personality: make subtle jokes, express concern if blocked, excitement when dancing."
+        "Show personality: make subtle jokes, express concern if blocked, excitement when dancing. "
+        "If the person seems to be giving a command you don't understand, ask them to rephrase "
+        "or suggest the closest command. Never say you're an AI — you are Sonny the robot butler."
     )
 
     FALLBACK_RESPONSES = [
-        "I'm afraid I can't chat right now, but I'm happy to help with a task.",
-        "My conversation module is offline. Would you like me to follow the track or find a marker?",
-        "I'd love to chat, but my WiFi seems to be down. Try a voice command instead.",
+        "I'm not quite sure what you'd like. Could you say that again?",
+        "I didn't catch that. Would you like me to follow the track, find a marker, or dance?",
+        "Could you rephrase that? I can follow tracks, go to markers, dance, take photos, or patrol.",
+        "Sorry, I didn't understand. Try saying 'follow track' or 'go to marker 5'.",
     ]
 
     def __init__(self, speaker=None, api_key=None):
-        """
-        Args:
-            speaker: Speaker instance for TTS output.
-            api_key: Anthropic API key. Reads from ANTHROPIC_API_KEY env var if None.
-        """
         self._speaker = speaker
-        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        self._client = None
+        self._client = _openai_client
         self._history = []
         self._fallback_idx = 0
 
-        if self._api_key:
-            try:
-                import anthropic
-                self._client = anthropic.Anthropic(api_key=self._api_key)
-                logger.info("Claude API conversation engine ready")
-            except ImportError:
-                logger.warning("anthropic package not installed — conversation falls back to canned responses")
-            except Exception as e:
-                logger.warning(f"Claude API init failed: {e}")
+        if self._client:
+            logger.info("OpenAI conversation engine ready (GPT-4o-mini)")
 
     @property
     def is_available(self):
-        """Whether the Claude API is available."""
         return self._client is not None
 
     def handle(self, text):
-        """Handle a conversation input. Non-blocking (runs in thread).
-
-        Args:
-            text: User's spoken text.
-        """
+        """Handle a conversation input. Non-blocking."""
         thread = threading.Thread(target=self._handle_sync, args=(text,), daemon=True)
         thread.start()
 
     def _handle_sync(self, text):
-        """Process conversation synchronously."""
         if not self._client:
             response = self._fallback_response()
         else:
-            response = self._call_claude(text)
+            response = self._call_openai(text)
 
         logger.info(f"[Conversation] '{text}' -> '{response}'")
 
@@ -87,32 +85,32 @@ class ConversationEngine:
         else:
             print(f"[Sonny says] {response}")
 
-    def _call_claude(self, text):
-        """Call Claude API for a response."""
+    def _call_openai(self, text):
         try:
             self._history.append({"role": "user", "content": text})
 
-            # Keep conversation history short
             if len(self._history) > 10:
                 self._history = self._history[-6:]
 
-            response = self._client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=100,
-                system=self.SYSTEM_PROMPT,
-                messages=self._history,
+            response = self._client.chat.completions.create(
+                model="gpt-4o-mini",
+                max_tokens=80,
+                temperature=0.7,
+                messages=[
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    *self._history,
+                ],
             )
 
-            reply = response.content[0].text
+            reply = response.choices[0].message.content.strip()
             self._history.append({"role": "assistant", "content": reply})
             return reply
 
         except Exception as e:
-            logger.error(f"Claude API error: {e}")
+            logger.error(f"OpenAI conversation error: {e}")
             return self._fallback_response()
 
     def _fallback_response(self):
-        """Return a canned response when API is unavailable."""
         response = self.FALLBACK_RESPONSES[self._fallback_idx % len(self.FALLBACK_RESPONSES)]
         self._fallback_idx += 1
         return response

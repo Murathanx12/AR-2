@@ -282,6 +282,7 @@ def main():
     parser = argparse.ArgumentParser(description="Sonny V4 — Alfred Robotic Butler")
     parser.add_argument("--headless", action="store_true", help="Run without GUI")
     parser.add_argument("--fullscreen", action="store_true", help="Start GUI in fullscreen mode")
+    parser.add_argument("--demo", action="store_true", help="Demo face mode — large eyes + status for 14\" monitor")
     parser.add_argument("--no-voice", action="store_true", help="Skip voice subsystem")
     parser.add_argument("--no-camera", action="store_true", help="Skip camera subsystem")
     parser.add_argument("--no-web", action="store_true", help="Skip phone web controller")
@@ -290,6 +291,10 @@ def main():
                         help="Show GUI on Pi's own monitor (HDMI) instead of X11")
     parser.add_argument("--test-vision", action="store_true", help="Run vision test and exit")
     parser.add_argument("--test-voice", action="store_true", help="Run voice test and exit")
+    parser.add_argument("--vision-ai", action="store_true",
+                        help="Enable OpenAI Vision scene analyzer (off by default, uses API budget)")
+    parser.add_argument("--vision-ai-interval", type=float, default=5.0,
+                        help="Seconds between OpenAI Vision analyses (default: 5.0, use 1.0 for testing)")
     parser.add_argument("--speed", type=int, default=CONFIG.speed.default_speed,
                         help=f"Override default speed (default: {CONFIG.speed.default_speed})")
     args = parser.parse_args()
@@ -310,6 +315,8 @@ def main():
         headless=args.headless,
         no_voice=args.no_voice,
         no_camera=args.no_camera,
+        use_vision_ai=args.vision_ai,
+        vision_ai_interval=args.vision_ai_interval,
     )
 
     if args.speed != CONFIG.speed.default_speed:
@@ -363,12 +370,17 @@ def main():
     gui = None
     if not args.headless:
         try:
-            from alfred.gui.debug_gui import DebugGUI
-            gui = DebugGUI(fsm=fsm, fullscreen=args.fullscreen)
+            if args.demo:
+                from alfred.gui.demo_gui import DemoGUI
+                gui = DemoGUI(fsm=fsm, fullscreen=True)
+                print("Demo face mode — press ESC to quit")
+            else:
+                from alfred.gui.debug_gui import DebugGUI
+                gui = DebugGUI(fsm=fsm, fullscreen=args.fullscreen)
+                print("GUI started. WASD=move QE=turn Space=STOP M=mode F11=fullscreen ESC=quit")
+                print("Click command buttons if voice fails.")
             gui.start()
             fsm.set_gui(gui)
-            print("GUI started. WASD=move QE=turn Space=STOP M=mode F11=fullscreen ESC=quit")
-            print("Click command buttons if voice fails.")
         except Exception as e:
             print(f"GUI unavailable ({e}), running headless")
             gui = None

@@ -1,9 +1,10 @@
-"""Voice listener — speech-to-text with Google STT (primary), Whisper (fallback), or VOSK.
+"""Voice listener — speech-to-text with OpenAI Whisper API, Google STT, or local fallbacks.
 
 Priority order:
-1. Google Speech Recognition (cloud, most accurate, handles accents)
-2. Whisper tiny (offline, good accuracy)
-3. VOSK (offline, grammar-constrained, lowest accuracy)
+1. OpenAI Whisper API (cloud, best accuracy, handles noise/accents)
+2. Google Speech Recognition (cloud, free, good accuracy)
+3. Whisper tiny (offline, decent accuracy)
+4. VOSK (offline, grammar-constrained, lowest accuracy)
 
 Design:
 - Record audio, detect silence (energy-based VAD)
@@ -22,6 +23,12 @@ import struct
 import math
 import io
 import wave
+import tempfile
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +37,19 @@ try:
     _HAS_PYAUDIO = True
 except (ImportError, OSError):
     _HAS_PYAUDIO = False
+
+# OpenAI Whisper API (best quality, handles noise)
+_HAS_OPENAI = False
+_openai_client = None
+try:
+    from openai import OpenAI
+    _key = os.environ.get("OPENAI_API_KEY")
+    if _key:
+        _openai_client = OpenAI(api_key=_key)
+        _HAS_OPENAI = True
+        logger.info("OpenAI Whisper API available")
+except ImportError:
+    pass
 
 # Google Speech Recognition (best accuracy for accented English)
 _HAS_GOOGLE_STT = False
@@ -138,8 +158,8 @@ class VoiceListener:
         if not _HAS_PYAUDIO:
             print("[Voice] pyaudio not installed - voice disabled")
             return
-        if not _HAS_WHISPER and not _HAS_VOSK:
-            print("[Voice] No STT engine (install faster-whisper or vosk)")
+        if not _HAS_OPENAI and not _HAS_GOOGLE_STT and not _HAS_WHISPER and not _HAS_VOSK:
+            print("[Voice] No STT engine (set OPENAI_API_KEY or install faster-whisper/vosk)")
             return
         self._running = True
         self._thread = threading.Thread(target=self._listen_loop, daemon=True)
@@ -173,13 +193,40 @@ class VoiceListener:
         with self._lock:
             return self._awake
 
+    # ---- OpenAI Whisper API ----
+
+    def _transcribe_openai_api(self, audio_data):
+        """Transcribe audio using OpenAI Whisper API. Best accuracy, handles noise."""
+        if not _openai_client:
+            return None
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(self.SAMPLE_RATE)
+            wf.writeframes(audio_data)
+        wav_buffer.seek(0)
+        wav_buffer.name = "audio.wav"
+        try:
+            response = _openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=wav_buffer,
+                language="en",
+                prompt="Hello Sonny, follow the track, go to marker, dance, stop, patrol, photo",
+            )
+            text = response.text.strip().lower()
+            logger.info(f"OpenAI Whisper API: '{text}'")
+            return text
+        except Exception as e:
+            logger.warning(f"OpenAI Whisper API error: {e}")
+            return None
+
     # ---- Google STT ----
 
     def _transcribe_google(self, audio_data):
         """Transcribe audio bytes using Google Speech Recognition. Returns text string."""
         recognizer = sr.Recognizer()
-        # Convert raw PCM to AudioData for speech_recognition
-        audio = sr.AudioData(audio_data, self.SAMPLE_RATE, 2)  # 16-bit = 2 bytes
+        audio = sr.AudioData(audio_data, self.SAMPLE_RATE, 2)
         try:
             text = recognizer.recognize_google(audio, language="en-US")
             return text.lower().strip()
@@ -187,7 +234,7 @@ class VoiceListener:
             return ""
         except sr.RequestError as e:
             print(f"[Voice] Google STT network error: {e}")
-            return None  # None = network failure, trigger fallback
+            return None
 
     # ---- Whisper setup ----
 
@@ -296,15 +343,20 @@ class VoiceListener:
     # ---- Main loop ----
 
     def _listen_loop(self):
-        # Try engines in priority order: Whisper > VOSK
-        # (Local-only — no cloud APIs, works offline and in China)
+        use_cloud = _HAS_OPENAI or _HAS_GOOGLE_STT
         use_whisper = False
         vosk_rec = None
 
+        if _HAS_OPENAI:
+            self._engine = "openai-api"
+            print("[Voice] Primary STT: OpenAI Whisper API")
+
         if _HAS_WHISPER:
             use_whisper = self._init_whisper()
+            if not _HAS_OPENAI:
+                print("[Voice] Primary STT: Whisper local")
 
-        if not use_whisper and _HAS_VOSK:
+        if not use_whisper and not use_cloud and _HAS_VOSK:
             model_path = self._find_vosk_model()
             if model_path:
                 try:
@@ -319,9 +371,9 @@ class VoiceListener:
                 print("[Voice] No VOSK model found")
                 return
 
-        if not use_whisper and vosk_rec is None:
+        if not use_cloud and not use_whisper and vosk_rec is None:
             print("[Voice] No STT engine available")
-            print("[Voice] Install: pip install faster-whisper")
+            print("[Voice] Set OPENAI_API_KEY or install faster-whisper")
             return
 
         # Open mic
@@ -340,7 +392,7 @@ class VoiceListener:
         print(f"[Voice] Ready ({self._engine}). Say 'Hello Sonny' to wake up.")
 
         try:
-            if use_whisper:
+            if use_cloud or use_whisper:
                 self._vad_loop(stream, p)
             else:
                 self._vosk_loop(stream, p, vosk_rec)
@@ -425,8 +477,24 @@ class VoiceListener:
                 time.sleep(0.5)
 
     def _process_audio(self, audio_data):
-        """Transcribe audio with Whisper and process the text."""
-        text = self._transcribe_whisper(audio_data)
+        """Transcribe audio with best available engine. Priority: OpenAI API > Google > Whisper."""
+        text = None
+
+        if _HAS_OPENAI:
+            text = self._transcribe_openai_api(audio_data)
+            if text:
+                self._engine = "openai-api"
+
+        if not text and _HAS_GOOGLE_STT:
+            text = self._transcribe_google(audio_data)
+            if text:
+                self._engine = "google"
+
+        if not text and _HAS_WHISPER:
+            text = self._transcribe_whisper(audio_data)
+            if text:
+                self._engine = "whisper"
+
         if not text:
             return
 

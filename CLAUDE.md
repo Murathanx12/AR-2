@@ -3,32 +3,41 @@ Sonny (Alfred V4) — Mecanum-wheeled robotic butler for HKU School of Innovatio
 Demo: April 24, 2026. Repo: https://github.com/Murathanx12/AR-2
 Wake phrase: "Hello Sonny" (say once, stays awake until "sleep")
 
-Known Issues (Apr 17, 2026)
+Known Issues (Apr 20, 2026)
 
-1. ESP32 motors not responding — UART connects but motors don't spin. Suspected hardware (wiring/short/battery). Run scripts/test_esp32.py to diagnose.
-2. USB microphone weak — only picks up from ~30cm. Threshold lowered to 1.5x noise floor. Need conference mic or phone relay for demo.
-3. Obstacle detection disabled — camera-based detection had too many false positives. Only ultrasonic (when connected) triggers BLOCKED state.
+1. ESP32 motors not responding — UART connects but motors don't spin. Suspected hardware (wiring/short/battery). Run scripts/test_esp32.py to diagnose. CRITICAL for demo.
+2. USB microphone weak — only picks up from ~30cm. WORKAROUND: use phone as wireless mic via web dashboard (http://<pi-ip>:8080, hold-to-talk button).
+3. Obstacle detection — YOLO (offline, primary) + ultrasonic HC-SR04 (when wired). OpenAI Vision scene analyzer is opt-in via `--vision-ai` flag (off by default to save API budget).
 4. MediaPipe not installed on Pi — person/gesture detection unavailable. Install: pip install mediapipe
 5. OpenCV ArUco API — Pi has older OpenCV, code supports both old and new API. If ArUco fails, check cv2 version.
-6. USB hub power — camera and mic must be plugged directly into Pi USB ports, NOT through the USB hub. WiFi adapter and speaker can stay on hub.
+6. USB hub power — camera and mic must be plugged directly into Pi USB ports, NOT through the USB hub.
+7. VPN not auto-starting — run `sudo openvpn --config /etc/openvpn/windscribe.conf --daemon` each boot, or set up systemd service (see below).
 
 Architecture
 
 ESP32-S3: Motor PWM + 5x IR sensor reading at 20Hz + HC-SR04 ultrasonic at 10Hz + NeoPixel LEDs + buzzer. Firmware: esp32/src/main.cpp (PlatformIO).
 Raspberry Pi 5: Decision engine. Python. FSM + vision + voice + expression.
-14" Type-C monitor: Robot face (OLED eyes) + camera feed + status GUI via Pygame.
+14" Type-C monitor: Demo face (large animated eyes + status bar) via Pygame `--demo` mode. Debug GUI via default mode.
 UART: 115200 baud on /dev/ttyAMA2. Pi sends mv_vector:vx,vy,omega\n, ESP sends IR_STATUS:XX\n and DIST:XX.X\n.
 Mecanum IK: FL=vx+vy+omega, FR=vx-vy-omega, RL=vx-vy+omega, RR=vx+vy-omega. PWM 50-200 from 0-100%.
 Wiring: See docs/WIRING.md for complete pin map.
 
 Network / VPN
 
-- Windscribe VPN via OpenVPN (Singapore) — required for Claude API and Google STT in HK/China
+- Windscribe VPN via OpenVPN (Singapore) — required for OpenAI API, Claude API, and Google STT in HK/China
 - Config: /etc/openvpn/windscribe.conf, auth: /etc/openvpn/windscribe-auth.txt
 - Connect: sudo openvpn --config /etc/openvpn/windscribe.conf --daemon
 - Disconnect: sudo killall openvpn
 - Verify: curl -s https://ipinfo.io/country (should show SG)
-- Cloudflare WARP also installed but conflicts with Claude Code — use Windscribe instead
+- Auto-start: sudo systemctl enable openvpn@windscribe (or create custom systemd service)
+
+API Keys
+
+- Store in `.env` file at project root (already in .gitignore)
+- OPENAI_API_KEY — for Whisper STT, GPT-4o-mini intent classification, and Vision scene analysis
+- ANTHROPIC_API_KEY — optional, not currently used (conversation uses OpenAI GPT-4o-mini)
+- Budget: ~$25 on OpenAI. Whisper=$0.006/min, GPT-4o-mini=$0.15/1M input. Enough for weeks of testing.
+- All modules auto-load from .env via python-dotenv
 
 Hardware Inventory
 
@@ -50,53 +59,75 @@ Purchased (additional):
 - M2/M2.5/M3 bolt+nut+allen key assortment kit
 
 On-robot peripherals:
-- SSD1306 128x64 OLED (I2C @ 0x3C) — animated eyes
-- PCA9685 16-channel servo controller — head tilt (ch0) + arm servos (ch1-4)
+- SSD1306 128x64 OLED (I2C @ 0x3C) — animated eyes (also rendered large on 14" monitor in demo mode)
+- PCA9685 16-channel servo controller — head tilt (ch0) + left arm (ch1-2) + right arm (ch3-4)
 - 4x WS2812B NeoPixel LEDs (GPIO48)
 - Piezo buzzer (GPIO46)
 - HC-SR04 ultrasonic (GPIO4 trig, GPIO2 echo)
 - 5x TCRT5000 IR line sensors (GPIO 5,6,7,15,45)
 
+Servo Arm Layout (PCA9685):
+- ch0: Head tilt (up/down)
+- ch1: Left shoulder (perpendicular mount, rotates arm up/down)
+- ch2: Left elbow (tilt)
+- ch3: Right shoulder
+- ch4: Right elbow
+- Arms are cosmetic — wave on greeting, carry pose during delivery, dance moves, shrug when blocked
+
 Competition Requirements (Minilab 6 / Project Alfred)
 
-R1: Voice commands — wake phrase "Hello Sonny", FOLLOW TRACK, GO TO QR CODE. Google STT (primary) + Whisper tiny (offline fallback) + exact keyword matching. ✅ (code done, testing needed)
-R2: Line-following delivery. IR sensors + weighted algorithmic control. ✅ (code done, needs ESP32 hardware fix)
-R3: ArUco marker approach. Visual-only with EMA smoothing + simultaneous steer/drive. ✅ (code done, needs ESP32)
-R4: Obstacle detection — ultrasonic HC-SR04 only (camera detection disabled — too many false positives). ✅ (code done, needs ultrasonic wired)
-R5: Intention indicators — NeoPixel LEDs per state, TTS (piper/espeak-ng), buzzer, OLED eyes, 14" screen GUI. ✅
+R1: Voice commands — wake phrase "Hello Sonny", FOLLOW TRACK, GO TO QR CODE. OpenAI Whisper API (primary) + Google STT (fallback) + GPT-4o-mini smart intent classification. ✅
+R2: Line-following delivery. IR sensors + weighted algorithmic control. ✅ (needs ESP32 hardware fix)
+R3: ArUco marker approach (1-50). Visual-only with EMA smoothing. Say "go to marker 5" or any number 1-50. ✅ (needs ESP32)
+R4: Obstacle detection — ultrasonic HC-SR04 + OpenAI Vision scene analyzer for smart understanding. ✅ (needs ultrasonic wired)
+R5: Intention indicators — NeoPixel LEDs per state, TTS (piper/espeak-ng), buzzer, OLED eyes, 14" demo face GUI, arm gestures. ✅
 EC1: Gesture recognition — MediaPipe hands, 6 gestures, gesture→action in patrol. ✅ (needs mediapipe install)
-EC3: Claude API butler conversation — claude-haiku-4-5 with personality. ✅ (needs ANTHROPIC_API_KEY + VPN)
-EC5: Butler personality — 8 emotions, animated eyes, head tracking. ✅
+EC2: Autonomous rerouting — obstacle_avoider.py potential field. ✅ (basic)
+EC3: OpenAI GPT-4o-mini butler conversation. Unknown intents auto-routed to chat. Low-confidence intents ask to rephrase. ✅ (needs OPENAI_API_KEY + VPN)
+EC4: Autonomous patrol — random wander + person detection + gesture recognition. ✅
+EC5: Butler personality — 8 emotions, animated eyes on 14" screen, arm servos, head tracking. ✅
 
 Voice System Design
 
-- Primary STT: Google Speech Recognition (cloud, best accuracy for accented English, free API)
-- Offline fallback: Whisper tiny (faster-whisper, ~80% accuracy) — auto-used when network fails
-- Legacy fallback: VOSK grammar-constrained (if neither Google nor Whisper available)
+- Primary STT: OpenAI Whisper API (cloud, best accuracy, handles noise/accents, $0.006/min)
+- Fallback 1: Google Speech Recognition (cloud, free, good accuracy)
+- Fallback 2: Whisper tiny (offline, faster-whisper, ~80% accuracy)
+- Fallback 3: VOSK grammar-constrained (if nothing else works)
+- Smart intent: GPT-4o-mini classifies natural language into intents + extracts marker IDs 1-50
+- Keyword fallback: longest-match keyword classifier (works offline)
 - Energy-based VAD detects when you stop speaking, then transcribes complete utterance
 - Noise calibration at startup — threshold = 1.5x ambient noise floor
 - Wake word: "Hello Sonny" (also accepts "hello sunny", "hello sony", "hey sonny", bare "hello")
 - Say wake word ONCE — robot stays awake. All subsequent speech = commands.
 - "stop" always works from any state, even before wake word
 - "sleep" requires wake word again
-- Mic mutes during TTS to prevent echo loop (speaker → mic → false command)
-- Intent classifier: exact keyword match only. No fuzzy, no confirmation dialogs.
-- Install: pip install SpeechRecognition faster-whisper
+- Mic mutes during TTS to prevent echo loop
+- Unknown intents auto-routed to OpenAI GPT-4o-mini conversation engine
+- Low-confidence intents (< 70%) ask "Did you mean X?" instead of blindly executing
+- Phone mic relay: web dashboard has hold-to-talk button, streams audio to Pi for transcription
+- Install: pip install openai python-dotenv SpeechRecognition faster-whisper
 
 Camera System
 
 - USB camera auto-detected (scans indices 0-9, uses V4L2 backend to avoid GStreamer issues)
 - Native resolution: 1920x1080 (set in config.py VisionConfig)
-- Camera MUST be plugged directly into Pi USB port (not through hub — causes power/bandwidth issues)
-- ArUco: DICT_4X4_50, supports both old and new OpenCV API
+- Camera MUST be plugged directly into Pi USB port (not through hub)
+- ArUco: DICT_4X4_50 markers 0-49, supports both old and new OpenCV API
+- OpenAI Vision scene analyzer: periodic AI-powered scene understanding during patrol/search states
+- Person detection: MediaPipe face + hand + 6 gestures (when installed)
 
 GUI System
 
-- Pygame fullscreen GUI with --fullscreen flag (or F11 to toggle)
-- Camera feed with ArUco/face/obstacle overlays
-- Clickable command buttons as voice fallback (Wake Up, Follow Track, Dance, Stop, etc.)
-- Keyboard controls: WASD=move, QE=turn, Space=emergency stop, M=mode, 1/2=speed
-- Web dashboard also available at http://<pi-ip>:8080 with keyboard drive (WASD+QE+Space)
+- Debug mode (default): Pygame dashboard with camera feed, eyes, sensors, command buttons, event log
+- Demo mode (--demo): Fullscreen animated robot face for the 14" monitor
+  - Large animated eyes with 8 emotions, gaze tracking, auto-blink
+  - Mouth animation (smile, frown, surprised O, neutral line)
+  - Status bar showing current state + voice transcript + intent
+  - Camera PiP in corner with ArUco overlay
+  - Rainbow border effect during dance
+  - Press ESC to quit, F11 to toggle fullscreen
+- Keyboard controls: WASD=move, QE=turn, Space=STOP, M=mode, 1/2=speed, F11=fullscreen
+- Web dashboard: http://<pi-ip>:8080 with phone mic relay, keyboard drive, all sensors
 
 UART Protocol (Pi → ESP32)
 
@@ -117,15 +148,15 @@ DIST:XX.X (ultrasonic cm, 10Hz)
 
 V4 Modules
 
-alfred/config.py — All params as frozen dataclasses. AlfredConfig singleton. Camera index auto-detected, resolution 1920x1080.
-alfred/comms/ — protocol.py (pure cmd_* formatters), uart.py (UARTBridge, prints connection status).
-alfred/navigation/ — line_follower.py (weighted algo), aruco_approach.py (visual-only + EMA smoothing), obstacle_avoider, patrol.
-alfred/vision/ — camera (auto-detect V4L2), aruco (DICT_4X4_50, dual API), obstacle (contour), person (MediaPipe face+hand+gesture), BEV, course_mapper.
-alfred/voice/ — listener.py (Google STT primary + Whisper fallback + VOSK, VAD, wake-once, mic mute), intent.py (exact keyword match), speaker.py (piper/espeak-ng TTS), conversation.py (Claude API EC3).
-alfred/expression/ — eyes.py (8 emotions, gaze, auto-blink), leds.py (NeoPixel), head.py (PCA9685 servo), personality.py (state→expression, 10Hz).
-alfred/fsm/ — states.py (17-state IntEnum), controller.py (30Hz dispatch, dance music via ffplay).
-alfred/gui/ — debug_gui.py (Pygame fullscreen: eyes, camera+overlays, IR, vector, voice I/O, command buttons, event log).
-alfred/web/ — app.py (Flask dashboard: live camera MJPEG, all sensors, voice I/O, keyboard drive WASD, event log).
+alfred/config.py — All params as frozen dataclasses. AlfredConfig singleton.
+alfred/comms/ — protocol.py (pure cmd_* formatters), uart.py (UARTBridge, thread-safe).
+alfred/navigation/ — line_follower.py (weighted algo, 6-state sub-FSM), aruco_approach.py (visual EMA), obstacle_avoider.py (potential field), patrol.py (wander + person detect), path_planner.py (pure pursuit).
+alfred/vision/ — camera.py (auto-detect V4L2), aruco.py (DICT_4X4_50, dual API), yolo_detector.py (YOLOv8n offline object detection, primary), obstacle.py (contour fallback), person.py (MediaPipe face+hand+gesture), scene_analyzer.py (GPT-4o-mini vision, backup), bev.py, course_mapper.py.
+alfred/voice/ — listener.py (OpenAI API primary + Google + Whisper + VOSK, VAD, wake-once, mic mute), intent.py (GPT-4o-mini smart + keyword fallback), speaker.py (piper/espeak-ng TTS), conversation.py (GPT-4o-mini butler chat).
+alfred/expression/ — eyes.py (8 emotions, OLED + GUI), leds.py (NeoPixel), head.py (PCA9685 ch0), arms.py (PCA9685 ch1-4, cosmetic animations), personality.py (state→expression, 10Hz).
+alfred/fsm/ — states.py (17-state IntEnum), controller.py (30Hz dispatch, integrates all subsystems).
+alfred/gui/ — debug_gui.py (Pygame debug dashboard), demo_gui.py (fullscreen robot face for 14" monitor).
+alfred/web/ — app.py (Flask dashboard: camera MJPEG, sensors, voice, keyboard drive, phone mic relay).
 alfred/utils/ — logging (colored), timing (RateTimer, Stopwatch).
 
 Logging
@@ -136,16 +167,19 @@ Logging
 
 Key Commands
 ```bash
-# Connect VPN (required for Claude API / Google STT)
+# Connect VPN (required for all cloud APIs)
 sudo openvpn --config /etc/openvpn/windscribe.conf --daemon
 
 # Run Sonny V4 (on Raspberry Pi)
 cd ~/AR-2 && source .venv/bin/activate
-python3 Minilab5/alfred.py --fullscreen    # fullscreen GUI on Pi monitor
-python3 Minilab5/alfred.py                 # windowed GUI
-python3 Minilab5/alfred.py --headless      # terminal dashboard
-python3 Minilab5/alfred.py --no-voice      # skip voice
-python3 Minilab5/alfred.py --no-camera     # skip camera
+python3 Minilab5/alfred.py --demo --fullscreen  # demo face on 14" monitor
+python3 Minilab5/alfred.py --fullscreen          # debug GUI fullscreen
+python3 Minilab5/alfred.py                       # windowed debug GUI
+python3 Minilab5/alfred.py --headless            # terminal dashboard (SSH)
+python3 Minilab5/alfred.py --no-voice            # skip voice
+python3 Minilab5/alfred.py --no-camera           # skip camera
+python3 Minilab5/alfred.py --vision-ai           # enable OpenAI Vision (5s interval)
+python3 Minilab5/alfred.py --vision-ai --vision-ai-interval 1.0  # test mode (1s)
 
 # Build ESP32 firmware (from Windows PC)
 cd esp32 && pio run --target upload
@@ -158,8 +192,27 @@ python -m pytest tests/
 
 # Test individual modules
 python3 scripts/test_aruco.py
-python3 scripts/calibrate_bev.py
+python3 scripts/test_whisper.py
+python3 scripts/test_tts.py
 
 # Read latest log
 cat ~/AR-2/logs/$(ls -t ~/AR-2/logs/ | head -1)
+
+# Install new dependencies
+pip install openai python-dotenv
+```
+
+Dependencies (install on Pi)
+```bash
+pip install openai python-dotenv     # OpenAI API + env loading
+pip install ultralytics              # YOLOv8 offline object detection
+pip install SpeechRecognition        # Google STT
+pip install faster-whisper           # Offline Whisper fallback
+pip install mediapipe                # Person/gesture detection (EC1)
+pip install flask                    # Web dashboard
+pip install anthropic                # Claude conversation (EC3)
+pip install pyaudio                  # Microphone input
+pip install pygame                   # GUI
+pip install opencv-python-headless   # Vision
+pip install Pillow                   # Eye rendering
 ```

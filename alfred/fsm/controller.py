@@ -64,11 +64,14 @@ class AlfredFSM:
     Graceful degradation: missing hardware = skip that subsystem.
     """
 
-    def __init__(self, config=None, headless=False, no_voice=False, no_camera=False):
+    def __init__(self, config=None, headless=False, no_voice=False, no_camera=False,
+                 use_vision_ai=False, vision_ai_interval=5.0):
         self.config = config or CONFIG
         self.headless = headless
         self.no_voice = no_voice
         self.no_camera = no_camera
+        self.use_vision_ai = use_vision_ai
+        self.vision_ai_interval = vision_ai_interval
 
         # Core subsystems (always created)
         self.uart = UARTBridge(
@@ -111,6 +114,32 @@ class AlfredFSM:
                 self.person_detector = PersonDetector()
             except Exception as e:
                 print(f"[Init] Person detector unavailable: {e}")
+
+        # YOLO detector (offline, primary obstacle/person detection)
+        self.yolo_detector = None
+        if not no_camera:
+            try:
+                from alfred.vision.yolo_detector import YOLODetector
+                self.yolo_detector = YOLODetector()
+                if self.yolo_detector.is_available:
+                    print("[Init] YOLO object detector ready (offline)")
+                else:
+                    self.yolo_detector = None
+            except Exception:
+                pass
+
+        # Scene analyzer (OpenAI Vision — optional, off by default)
+        self.scene_analyzer = None
+        if use_vision_ai and not no_camera:
+            try:
+                from alfred.vision.scene_analyzer import SceneAnalyzer
+                self.scene_analyzer = SceneAnalyzer(min_interval=vision_ai_interval)
+                if self.scene_analyzer.is_available:
+                    print(f"[Init] OpenAI Scene Analyzer ready (interval={vision_ai_interval}s)")
+                else:
+                    self.scene_analyzer = None
+            except Exception:
+                pass
 
         # Navigation subsystems
         self.aruco_approach = None
@@ -198,6 +227,14 @@ class AlfredFSM:
                 eyes=self.eyes, leds=self.leds,
                 head=self.head, speaker=self.speaker,
             )
+        except Exception:
+            pass
+
+        # Arm servos (cosmetic)
+        self.arms = None
+        try:
+            from alfred.expression.arms import ArmController
+            self.arms = ArmController()
         except Exception:
             pass
 
@@ -313,6 +350,10 @@ class AlfredFSM:
         if announcement and self.speaker:
             self.speaker.say(announcement)
 
+        # EC5: Cosmetic arm animations
+        if self.arms:
+            self.arms.express_state(new_name)
+
     def _update_led(self, state):
         """Send LED color command for given state via UART."""
         color = STATE_LED_COLORS.get(state, (0, 0, 0))
@@ -344,14 +385,17 @@ class AlfredFSM:
         return 0 < dist < OBSTACLE_THRESHOLD_CM
 
     def _check_camera_obstacle(self) -> bool:
-        """Check camera-based obstacle detection (R4).
+        """Check camera-based obstacle detection using YOLO or contour fallback (R4).
 
-        Returns True if obstacle detected. Returns False if no detector
-        (safe default — don't block when we can't detect).
+        Returns True if obstacle detected. Returns False if no detector.
         """
-        if not self.obstacle_detector or self._last_frame is None:
-            return False  # no detector = assume clear (don't false-block)
-        return not self.obstacle_detector.is_path_clear(self._last_frame)
+        if self._last_frame is None:
+            return False
+        if self.yolo_detector:
+            return not self.yolo_detector.is_path_clear(self._last_frame)
+        if self.obstacle_detector:
+            return not self.obstacle_detector.is_path_clear(self._last_frame)
+        return False
 
     def tick(self):
         """Run one FSM cycle: read sensors, dispatch state handler, update expression."""
@@ -360,6 +404,11 @@ class AlfredFSM:
             self._last_frame = self.camera.read_frame()
             if self.gui and self._last_frame is not None:
                 self.gui.set_camera_frame(self._last_frame)
+
+        # Periodic AI scene analysis during active navigation
+        if self.scene_analyzer and self._last_frame is not None:
+            if self.state in (State.PATROL, State.ARUCO_SEARCH, State.PERSON_APPROACH):
+                self.scene_analyzer.analyze_async(self._last_frame)
 
         # Dispatch state handler
         handler = self._tick_dispatch.get(self.state)
@@ -417,9 +466,9 @@ class AlfredFSM:
             self.transition(State.SLEEPING)
             return
 
-        # EC3: Chat
-        if intent == "chat" and self.conversation:
-            self.conversation.handle(text)
+        # EC3: Chat — route to conversation engine
+        if intent == "chat":
+            self._route_to_conversation(text)
             return
 
         # Map to state
@@ -435,6 +484,24 @@ class AlfredFSM:
 
         target = intent_to_state.get(intent)
         if target:
+            # Low confidence — ask to confirm instead of blindly executing
+            if confidence < 0.7:
+                confirmations_ask = {
+                    "follow_track": "Did you say follow the track? Say yes or repeat your command.",
+                    "go_to_aruco":  "Did you say go to a marker? Say yes or repeat your command.",
+                    "dance":        "Did you want me to dance? Say yes or say it again.",
+                    "take_photo":   "Take a photo? Say yes or repeat.",
+                    "come_here":    "Did you say come here? Say yes or try again.",
+                    "patrol":       "Start patrolling? Say yes or say it again.",
+                    "search":       "Search for a marker? Say yes or try again.",
+                }
+                msg = confirmations_ask.get(intent, "I'm not sure I understood. Could you say that again?")
+                if self.speaker:
+                    self.speaker.say(msg)
+                if self.gui:
+                    self.gui.set_voice_output(msg)
+                return
+
             confirmations = {
                 "follow_track": "Following the track.",
                 "dance":        "Time to dance!",
@@ -444,7 +511,9 @@ class AlfredFSM:
                 "search":       "Searching for the marker.",
             }
             if intent in ("go_to_aruco", "search"):
-                marker_id = self.intent_classifier.extract_marker_id(text)
+                marker_id = getattr(self.intent_classifier, 'last_marker_id', None)
+                if marker_id is None:
+                    marker_id = self.intent_classifier.extract_marker_id(text)
                 if marker_id is not None:
                     msg = f"Searching for marker {marker_id}."
                 else:
@@ -463,13 +532,14 @@ class AlfredFSM:
             elif target == State.PHOTO:
                 self._photo_taken = False
             elif target == State.ARUCO_SEARCH:
-                # Check if a specific marker ID was mentioned
-                marker_id = self.intent_classifier.extract_marker_id(text)
+                marker_id = getattr(self.intent_classifier, 'last_marker_id', None)
+                if marker_id is None:
+                    marker_id = self.intent_classifier.extract_marker_id(text)
                 if marker_id is not None:
                     self._aruco_target_id = marker_id
                     print(f"[ArUco] Target set to marker ID {marker_id}")
                 else:
-                    self._aruco_target_id = None  # follow any marker
+                    self._aruco_target_id = None
                     print(f"[ArUco] Following any visible marker")
                 if self.aruco_approach:
                     self.aruco_approach.reset()
@@ -479,10 +549,20 @@ class AlfredFSM:
             pass  # ignore stray yes/no
 
         elif intent == "unknown":
-            if self.speaker:
-                self.speaker.say("confused")
+            self._route_to_conversation(text)
+
+    def _route_to_conversation(self, text):
+        """Route text to conversation engine, or ask to rephrase if unavailable."""
+        if self.conversation and self.conversation.is_available:
+            self.conversation.handle(text)
             if self.gui:
-                self.gui.set_voice_output(f"Didn't understand: {text}")
+                self.gui.set_voice_output(f"Chatting: {text}")
+        else:
+            msg = "I'm not sure what you'd like. Could you say that again? Try follow track, go to marker, or dance."
+            if self.speaker:
+                self.speaker.say(msg)
+            if self.gui:
+                self.gui.set_voice_output(msg)
 
     # -- State tick handlers ------------------------------------------------
 

@@ -190,6 +190,13 @@ font-size:11px;color:#484f58;gap:20px}
 <button class="btn stop" onclick="cmd('stop')">STOP</button>
 </div></div>
 
+<div class="card"><div class="lbl">Phone Mic (hold to talk)</div>
+<button class="btn wake" id="micBtn" style="grid-column:span 4;padding:14px;font-size:16px;font-weight:700"
+ ontouchstart="startMic(event)" ontouchend="stopMic(event)"
+ onmousedown="startMic(event)" onmouseup="stopMic(event)">🎤 HOLD TO TALK</button>
+<div id="micStatus" style="font-size:12px;color:#8b949e;text-align:center;margin-top:4px">Tap and hold to use phone as mic</div>
+</div>
+
 <div class="card"><div class="lbl">Keyboard Drive</div>
 <div class="kb-help">
 <div class="kb-row"><kbd class="kb-key">W</kbd> FWD</div>
@@ -276,6 +283,46 @@ const l=document.getElementById('log');logCount++;
 const t=new Date().toLocaleTimeString().slice(0,8);
 l.innerHTML='<div class="'+cls+'">'+t+' '+msg+'</div>'+l.innerHTML;
 if(l.children.length>50)l.removeChild(l.lastChild)}
+
+// Phone mic recording
+let mediaRecorder=null, audioChunks=[], micStream=null;
+async function startMic(e){
+e.preventDefault();
+const btn=document.getElementById('micBtn');
+const st=document.getElementById('micStatus');
+try{
+if(!micStream){micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,sampleRate:16000}})}
+audioChunks=[];
+mediaRecorder=new MediaRecorder(micStream,{mimeType:'audio/webm;codecs=opus'});
+mediaRecorder.ondataavailable=e=>{if(e.data.size>0)audioChunks.push(e.data)};
+mediaRecorder.start();
+btn.style.background='#f85149';btn.textContent='🔴 RECORDING...';
+st.textContent='Listening...';st.style.color='#f85149';
+}catch(err){st.textContent='Mic access denied: '+err.message;st.style.color='#f85149'}}
+
+function stopMic(e){
+e.preventDefault();
+const btn=document.getElementById('micBtn');
+const st=document.getElementById('micStatus');
+if(!mediaRecorder||mediaRecorder.state==='inactive')return;
+mediaRecorder.onstop=async()=>{
+const blob=new Blob(audioChunks,{type:'audio/webm'});
+if(blob.size<1000){st.textContent='Too short, try again';return}
+st.textContent='Transcribing...';st.style.color='#58a6ff';
+const fd=new FormData();fd.append('audio',blob,'recording.webm');
+try{
+const r=await fetch(API+'/audio',{method:'POST',body:fd});
+const d=await r.json();
+if(d.text){
+st.textContent='Heard: "'+d.text+'" → '+d.intent;st.style.color='#3fb950';
+document.getElementById('heard').textContent=d.text;
+document.getElementById('intentD').textContent=d.intent+' ('+d.confidence+')';
+addLog('voice','Phone: "'+d.text+'" → '+d.intent);
+}else{st.textContent='No speech detected';st.style.color='#8b949e'}
+}catch(err){st.textContent='Error: '+err.message;st.style.color='#f85149'}
+};
+mediaRecorder.stop();
+btn.style.background='';btn.textContent='🎤 HOLD TO TALK'}
 
 // Poll status every 400ms
 setInterval(()=>{
@@ -398,6 +445,86 @@ class WebController:
                     self.fsm.line_follower.debug_vy = vy
                     self.fsm.line_follower.debug_omega = omega
             return jsonify({"ok": True})
+
+        @self._app.route("/audio", methods=["POST"])
+        def audio():
+            """Receive audio from phone mic, transcribe, and process as voice command."""
+            if 'audio' not in request.files:
+                return jsonify({"error": "No audio file"}), 400
+
+            audio_file = request.files['audio']
+            intent = "unknown"
+            confidence = "0%"
+            text = ""
+
+            try:
+                import tempfile, os
+                # Save uploaded audio to temp file
+                with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as tmp:
+                    audio_file.save(tmp.name)
+                    tmp_path = tmp.name
+
+                # Try OpenAI Whisper API first (handles webm natively)
+                openai_key = os.environ.get("OPENAI_API_KEY")
+                if openai_key:
+                    try:
+                        from openai import OpenAI
+                        client = OpenAI(api_key=openai_key)
+                        with open(tmp_path, 'rb') as f:
+                            response = client.audio.transcriptions.create(
+                                model="whisper-1",
+                                file=f,
+                                language="en",
+                                prompt="Hello Sonny, follow the track, go to marker, dance, stop, patrol",
+                            )
+                        text = response.text.strip().lower()
+                    except Exception as e:
+                        log_event(f"Phone mic OpenAI error: {e}")
+
+                # Fallback: convert webm to wav and use local STT
+                if not text:
+                    try:
+                        import subprocess
+                        wav_path = tmp_path.replace('.webm', '.wav')
+                        subprocess.run(
+                            ["ffmpeg", "-y", "-i", tmp_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
+                            capture_output=True, timeout=10
+                        )
+                        if os.path.exists(wav_path) and self.fsm and self.fsm.voice_listener:
+                            with open(wav_path, 'rb') as f:
+                                import wave
+                                with wave.open(f, 'rb') as wf:
+                                    audio_data = wf.readframes(wf.getnframes())
+                            text = self.fsm.voice_listener._transcribe_whisper(audio_data) or ""
+                            os.unlink(wav_path)
+                    except Exception as e:
+                        log_event(f"Phone mic fallback error: {e}")
+
+                os.unlink(tmp_path)
+
+                if text:
+                    log_event(f"PHONE MIC: '{text}'")
+                    if self.fsm:
+                        self.fsm._on_voice_command(text)
+                        if self.fsm.voice_listener and not self.fsm.voice_listener.is_awake:
+                            from alfred.voice.listener import WAKE_VARIANTS
+                            for wake in WAKE_VARIANTS:
+                                if wake in text.lower():
+                                    self.fsm.voice_listener._do_wake(
+                                        text.lower().split(wake, 1)[-1].strip()
+                                    )
+                                    break
+
+                    if self.fsm and self.fsm.intent_classifier:
+                        intent_name, conf = self.fsm.intent_classifier.classify(text)
+                        intent = intent_name
+                        confidence = f"{conf:.0%}"
+
+            except Exception as e:
+                log_event(f"Phone mic error: {e}")
+                return jsonify({"error": str(e)}), 500
+
+            return jsonify({"text": text, "intent": intent, "confidence": confidence})
 
         @self._app.route("/status")
         def status():

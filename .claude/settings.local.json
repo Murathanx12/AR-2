@@ -3,7 +3,8 @@
     "allow": [
       "Bash(~/.platformio/penv/Scripts/pio run:*)",
       "Bash(python:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(ls:*)"
     ]
   }
 }
