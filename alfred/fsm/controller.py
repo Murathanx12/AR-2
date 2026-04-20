@@ -251,6 +251,7 @@ class AlfredFSM:
         self._dance_proc = None
         self._photo_taken = False
         self._aruco_target_id = None  # None = follow any marker, int = specific ID
+        self._aruco_announced_id = None  # last marker ID we've already spoken about
         self._last_aruco_pose = None
         self._last_frame = None
         self._last_faces = []
@@ -444,13 +445,17 @@ class AlfredFSM:
         if self.gui:
             self.gui.set_voice_input(text, intent, confidence)
 
-        # STOP always works immediately from any state
+        # STOP always works immediately from any state.
+        # Kills active TTS, drops queued utterances, and clears nav state so
+        # pending announcements ("Found marker X…") don't keep playing.
         if intent == "stop":
             self.uart.send(cmd_stop())
             self.line_follower.debug_vx = 0
             self.line_follower.debug_vy = 0
             self.line_follower.debug_omega = 0
+            self._aruco_announced_id = None
             if self.speaker:
+                self.speaker.stop()
                 self.speaker.say("stop")
             if self.gui:
                 self.gui.set_voice_output("Stopping.")
@@ -541,6 +546,7 @@ class AlfredFSM:
                 else:
                     self._aruco_target_id = None
                     print(f"[ArUco] Following any visible marker")
+                self._aruco_announced_id = None  # fresh command, re-announce on acquire
                 if self.aruco_approach:
                     self.aruco_approach.reset()
             self.transition(target)
@@ -649,8 +655,12 @@ class AlfredFSM:
 
                 if target:
                     print(f"[ArUco] Found marker {target['id']}! size={target['size']:.0f}px")
-                    if self.speaker:
+                    # Only announce the first time we acquire this specific marker,
+                    # not every time the tracker re-acquires after brief occlusion.
+                    already = getattr(self, "_aruco_announced_id", None)
+                    if self.speaker and already != target["id"]:
                         self.speaker.say(f"Found marker {target['id']}. Approaching.")
+                        self._aruco_announced_id = target["id"]
                     self.transition(State.ARUCO_APPROACH)
                     return
 

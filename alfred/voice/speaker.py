@@ -105,6 +105,14 @@ class Speaker:
         )
         self._speaking = False
         self._lock = threading.Lock()
+        # Track active child procs so stop() can kill them mid-utterance.
+        self._active_piper = None
+        self._active_aplay = None
+        self._active_espeak = None
+        # Generation counter: incremented on stop(); queued utterances with a
+        # stale generation skip execution instead of speaking late.
+        self._stop_gen = 0
+        self._gen_lock = threading.Lock()
 
     @property
     def language(self):
@@ -113,7 +121,9 @@ class Speaker:
     def say(self, text):
         """Speak text (non-blocking). Accepts phrase keys or raw text."""
         actual_text = self.PHRASES.get(text, text)
-        thread = threading.Thread(target=self._speak_sync, args=(actual_text,), daemon=True)
+        with self._gen_lock:
+            gen = self._stop_gen
+        thread = threading.Thread(target=self._speak_sync, args=(actual_text, gen), daemon=True)
         thread.start()
 
     def say_sync(self, text):
@@ -121,13 +131,46 @@ class Speaker:
         actual_text = self.PHRASES.get(text, text)
         self._speak_sync(actual_text)
 
-    def _speak_sync(self, text):
+    def stop(self):
+        """Interrupt any active TTS and cancel queued utterances.
+
+        Increments the stop generation so queued threads skip when they wake.
+        Terminates any piper/aplay/espeak subprocess currently playing audio.
+        """
+        with self._gen_lock:
+            self._stop_gen += 1
+        for proc in (self._active_aplay, self._active_piper, self._active_espeak):
+            if proc is None:
+                continue
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        self._active_piper = None
+        self._active_aplay = None
+        self._active_espeak = None
+        self._speaking = False
+
+    def _gen_is_current(self, gen):
+        if gen is None:
+            return True
+        with self._gen_lock:
+            return gen == self._stop_gen
+
+    def _speak_sync(self, text, gen=None):
+        # Drop if stop() happened between say() call and thread start.
+        if not self._gen_is_current(gen):
+            return
+
         with self._lock:
+            # Re-check after queuing on the lock — the utterance ahead of us
+            # may have been a long one and stop() fired while we waited.
+            if not self._gen_is_current(gen):
+                return
             self._speaking = True
             try:
                 engine = _detect_tts()
                 if engine == "piper":
-                    # Pipe text safely without shell=True
                     piper_proc = subprocess.Popen(
                         ["piper", "--model", self._piper_voice, "--output-raw"],
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -136,21 +179,35 @@ class Speaker:
                         ["aplay", "-r", "22050", "-f", "S16_LE", "-c", "1"],
                         stdin=piper_proc.stdout, stderr=subprocess.DEVNULL,
                     )
-                    piper_proc.stdin.write(text.encode())
-                    piper_proc.stdin.close()
-                    aplay_proc.wait(timeout=30)
-                    piper_proc.wait(timeout=5)
+                    self._active_piper = piper_proc
+                    self._active_aplay = aplay_proc
+                    try:
+                        piper_proc.stdin.write(text.encode())
+                        piper_proc.stdin.close()
+                        aplay_proc.wait(timeout=30)
+                        piper_proc.wait(timeout=5)
+                    finally:
+                        self._active_piper = None
+                        self._active_aplay = None
                 elif engine in ("espeak-ng", "espeak"):
                     try:
-                        subprocess.run(
+                        espeak_proc = subprocess.Popen(
                             [engine, "-v", "mb-us1", "-s", "160", "-p", "40", text],
-                            timeout=30, capture_output=True, check=True
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         )
+                        self._active_espeak = espeak_proc
+                        espeak_proc.wait(timeout=30)
+                        if espeak_proc.returncode not in (0, None):
+                            raise subprocess.CalledProcessError(espeak_proc.returncode, engine)
                     except (subprocess.CalledProcessError, FileNotFoundError):
-                        subprocess.run(
+                        espeak_proc = subprocess.Popen(
                             [engine, "-s", "150", text],
-                            timeout=30, capture_output=True
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         )
+                        self._active_espeak = espeak_proc
+                        espeak_proc.wait(timeout=30)
+                    finally:
+                        self._active_espeak = None
                 else:
                     logger.info(f"[TTS] {text}")
             except subprocess.TimeoutExpired:
@@ -159,6 +216,9 @@ class Speaker:
                 logger.error(f"TTS error: {e}")
             finally:
                 self._speaking = False
+                self._active_piper = None
+                self._active_aplay = None
+                self._active_espeak = None
 
     def play_sound(self, name):
         if not _HAS_PYGAME:

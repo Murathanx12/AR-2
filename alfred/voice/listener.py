@@ -235,6 +235,11 @@ class VoiceListener:
         except sr.RequestError as e:
             print(f"[Voice] Google STT network error: {e}")
             return None
+        except Exception as e:
+            # SpeechRecognition needs the `flac` CLI to convert audio; if missing,
+            # it raises a plain OSError — catch generically to avoid spamming the loop.
+            logger.debug(f"Google STT unavailable: {e}")
+            return None
 
     # ---- Whisper setup ----
 
@@ -581,6 +586,21 @@ class VoiceListener:
         if words and words.issubset(WAKE_MAYBE | {"sonny", "sunny", "sony", "son"}):
             self._do_wake("")
             return
+
+        # Auto-wake on strong command keywords so the demo is forgiving when
+        # the presenter forgets the wake phrase. Narrow keyword set to reduce
+        # false triggers from ambient noise.
+        COMMAND_KEYWORDS = {"follow", "marker", "aruco", "dance", "patrol",
+                            "photo", "picture", "selfie", "wander"}
+        if (words & COMMAND_KEYWORDS) or ("go to" in lower and "marker" in lower):
+            logger.info(f"Auto-wake on command keyword: '{text}'")
+            print(f"[Voice] Auto-wake on command: '{text}'")
+            self._do_wake(text)
+            return
+
+        # Dropped — tell the user why so they aren't left guessing.
+        logger.info(f"Ignored (not awake, no wake phrase): '{text}'")
+        print(f"[Voice] (ignored — say 'Hello Sonny' first): '{text}'")
 
     def _do_wake(self, command_after=""):
         with self._lock:
