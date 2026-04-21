@@ -105,7 +105,10 @@ class ArucoApproach:
                 self._holding = False
                 log_event(f"ARUCO: marker moved away (dist={dist_m:.2f}m), re-approaching")
             elif dist_m < self.HOLD_NEAR_M:
-                omega = int(-20 * error_x)
+                # While backing up we still want the camera (facing forward)
+                # to track the marker: if marker is to the right we spin
+                # right (omega > 0), same convention line-follower uses.
+                omega = int(20 * error_x)
                 log_event(f"ARUCO: too close (dist={dist_m:.2f}m), backing up")
                 return (-15, 0, omega)
             elif dist_m > self.HOLD_FAR_M:

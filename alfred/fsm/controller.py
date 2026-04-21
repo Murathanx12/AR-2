@@ -257,6 +257,11 @@ class AlfredFSM:
         self._last_faces = []
         self._last_obstacles = []
         self._listen_timeout = None
+        # Person-follow state
+        self._person_smooth_cx = None
+        self._person_smooth_bw = None
+        self._person_lost_since = None
+        self._person_greeted = False
 
         # Dispatch table
         self._tick_dispatch = {
@@ -549,6 +554,11 @@ class AlfredFSM:
                 self._aruco_announced_id = None  # fresh command, re-announce on acquire
                 if self.aruco_approach:
                     self.aruco_approach.reset()
+            elif target == State.PERSON_APPROACH:
+                self._person_smooth_cx = None
+                self._person_smooth_bw = None
+                self._person_lost_since = None
+                self._person_greeted = False
             self.transition(target)
 
         elif intent in ("confirm", "cancel"):
@@ -827,7 +837,17 @@ class AlfredFSM:
         self.line_follower.debug_omega = omega
 
     def _tick_person_approach(self):
-        """Approach a detected person using face tracking."""
+        """Follow a person using face tracking.
+
+        Behaves like line-follow: smooth proportional control on both the
+        forward speed (by face size) and heading (by face lateral position).
+        Face size is measured as fraction of frame width so the stop distance
+        stays correct at any resolution. Same omega sign convention as the
+        line follower: face on the right → positive omega → spin right (CW).
+
+        On a single lost frame we rotate in place scanning, rather than
+        bailing to PATROL — one blink shouldn't abort the follow.
+        """
         if not self.person_detector or self._last_frame is None:
             self.transition(State.IDLE)
             return
@@ -835,31 +855,85 @@ class AlfredFSM:
         faces = self.person_detector.detect_faces(self._last_frame)
         self._last_faces = faces
 
+        frame_h, frame_w = self._last_frame.shape[:2]
+
         if not faces:
-            self.uart.send(cmd_stop())
-            self.transition(State.PATROL)
+            # Nothing in view this frame. Rotate-and-scan for a few seconds
+            # before giving up, the way a butler would look around.
+            if self._person_lost_since is None:
+                self._person_lost_since = time.monotonic()
+            lost_for = time.monotonic() - self._person_lost_since
+            if lost_for > 4.0:
+                if self.speaker:
+                    self.speaker.say("I seem to have lost you.")
+                self.uart.send(cmd_stop())
+                self._person_smooth_cx = None
+                self._person_smooth_bw = None
+                self._person_lost_since = None
+                self._person_greeted = False
+                self.transition(State.IDLE)
+                return
+            # Slow scan — same sweep speed as ArUco search.
+            self.uart.send(cmd_vector(0, 0, 8))
+            self.line_follower.debug_vx = 0
+            self.line_follower.debug_vy = 0
+            self.line_follower.debug_omega = 8
             return
 
+        # Re-acquired: reset lost timer.
+        self._person_lost_since = None
+
+        # Biggest face = closest person.
         face = max(faces, key=lambda f: f["bbox"][2] * f["bbox"][3])
-        cx, cy = face["center"]
-        bw, bh = face["bbox"][2], face["bbox"][3]
-        frame_w = self.config.vision.resolution[0]
+        cx_raw, _ = face["center"]
+        bw_raw = face["bbox"][2]
 
-        face_area = bw * bh
-        target_area = 15000
+        # EMA smoothing — without it, face-detection jitter makes the robot
+        # oscillate heading.
+        alpha = 0.4
+        if self._person_smooth_cx is None:
+            self._person_smooth_cx = cx_raw
+            self._person_smooth_bw = bw_raw
+        else:
+            self._person_smooth_cx += alpha * (cx_raw - self._person_smooth_cx)
+            self._person_smooth_bw += alpha * (bw_raw - self._person_smooth_bw)
+        cx = self._person_smooth_cx
+        bw = self._person_smooth_bw
 
-        if face_area >= target_area:
-            self.uart.send(cmd_stop())
-            self.uart.send(cmd_buzzer(800, 200))
-            print(">>> Person reached")
-            if self.speaker:
-                self.speaker.say("Hello! How may I help you?")
-            self.transition(State.IDLE)
-            return
+        # Resolution-independent sizing: the face width as a fraction of the
+        # frame width. ~0.25 means face fills a quarter of the frame → ~50 cm.
+        size_frac = bw / max(1, frame_w)
+        STOP_FRAC = 0.25     # stop at ~half a metre
+        CENTER_TOL = 0.08    # 8 % of frame width = centered
 
-        lateral_error = (cx - frame_w / 2) / (frame_w / 2)
-        vx = max(15, min(50, int(50 * (1.0 - face_area / target_area))))
-        omega = int(-lateral_error * 40)
+        lateral_error = (cx - frame_w / 2) / (frame_w / 2)  # -1..+1
+
+        # omega: face on right → error>0 → omega>0 (spin right, CW). Same
+        # convention as line-follower turn_strengths.
+        omega = int(lateral_error * 40)
+        omega = max(-40, min(40, omega))
+
+        # If way off-center, rotate in place before moving forward so we
+        # don't drive past the person.
+        if abs(lateral_error) > 0.35:
+            vx = 0
+        elif size_frac >= STOP_FRAC:
+            vx = 0
+            if not self._person_greeted:
+                self.uart.send(cmd_buzzer(800, 200))
+                if self.speaker:
+                    self.speaker.say("Hello! How may I help you?")
+                self._person_greeted = True
+        else:
+            # Scale speed by how close we are — full speed far away,
+            # creep the last stretch.
+            dist_ratio = size_frac / STOP_FRAC   # 0 far, 1 arrived
+            vx = int(40 * (1.0 - dist_ratio * 0.7))
+            vx = max(15, min(40, vx))
+
+        # Kill tiny omega jitter inside the centered band.
+        if abs(lateral_error) < CENTER_TOL:
+            omega = 0
 
         self.uart.send(cmd_vector(vx, 0, omega))
         self.line_follower.debug_vx = vx
