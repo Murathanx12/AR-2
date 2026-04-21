@@ -270,9 +270,15 @@ class AlfredFSM:
         self._aruco_last_frame_w = None
         self._aruco_last_seen_time = None
 
-        # Camera-based rerouting (strafe around visible obstacle)
+        # Camera-based rerouting. Three-phase sub-FSM: rotate so the camera
+        # faces the direction of motion, drive forward past the obstacle,
+        # then rotate back toward the marker's last-known bearing. This is
+        # strictly safer than pure mecanum strafe because the camera always
+        # leads the motion — we can see what we're about to hit.
         self._reroute_start_time = None
-        self._reroute_strafe_dir = 0   # -1 = strafe left, +1 = strafe right
+        self._reroute_phase = None      # "turn_away" | "drive_around" | "turn_back"
+        self._reroute_phase_start = None
+        self._reroute_omega_sign = 0    # -1 = first rotate left, +1 = first rotate right
         self._reroute_clear_count = 0
         self._reroute_from = None       # state to return to once path clears
 
@@ -460,7 +466,9 @@ class AlfredFSM:
 
     def _reset_reroute(self):
         self._reroute_start_time = None
-        self._reroute_strafe_dir = 0
+        self._reroute_phase = None
+        self._reroute_phase_start = None
+        self._reroute_omega_sign = 0
         self._reroute_clear_count = 0
         self._reroute_from = None
 
@@ -861,54 +869,62 @@ class AlfredFSM:
                 self.transition(State.IDLE)
 
     def _tick_rerouting(self):
-        """Camera-based strafe-around-obstacle manoeuvre.
+        """Three-phase obstacle-avoidance manoeuvre.
 
-        Picks a strafe direction (away from the biggest obstacle) on first
-        tick, then slides sideways until the forward path has been clear for
-        a few consecutive frames. Marker detection keeps running so we update
-        the bearing memory as we move — and the exit transitions back into
-        ARUCO_APPROACH, which will re-acquire the marker (either directly or
-        via ARUCO_SEARCH with direction-biased spin).
+        The camera always faces the direction of motion so we see what we're
+        about to hit — strictly safer than pure mecanum strafe. Sub-phases:
+
+          turn_away    Rotate in place until the obstacle is at the frame edge
+                       (robot now faces parallel to it, or past it).
+          drive_around Drive forward (camera leads); exits when the forward
+                       path stays clear for ~5 frames or a per-phase timeout.
+          turn_back    Rotate back in the opposite direction looking for the
+                       tag. Exits as soon as the tag appears, or on timeout
+                       → ARUCO_SEARCH (which further biases toward the
+                       last-known bearing).
+
+        Marker memory keeps updating during all three phases so any brief
+        glimpse of the tag refines the bearing we spin back toward.
         """
         if self._last_frame is None:
-            # No frame yet — nothing to decide on.
             self.uart.send(cmd_stop())
             return
 
         now = time.monotonic()
         fw = self._last_frame.shape[1]
 
-        # Fresh entry: pick strafe direction once, announce, start clock.
+        # First-tick setup: pick rotation direction + announce.
         if self._reroute_start_time is None:
             self._reroute_start_time = now
+            self._reroute_phase = "turn_away"
+            self._reroute_phase_start = now
             self._reroute_clear_count = 0
             obs_cx = self._front_obstacle_cx()
             if obs_cx is None:
-                # Camera reports nothing in the path — go straight back to
-                # approach instead of strafing blindly.
+                # Nothing in view to avoid — bail straight back to approach.
                 self._reset_reroute()
                 self.transition(self._reroute_from or State.ARUCO_APPROACH)
                 return
-            # Strafe AWAY from the obstacle. Mecanum convention: vy > 0 =
-            # strafe right. Obstacle centre on right half → vy should be
-            # negative (go left); on left half → vy positive (go right).
-            self._reroute_strafe_dir = -1 if obs_cx > fw / 2 else +1
-            side = "left" if self._reroute_strafe_dir < 0 else "right"
-            print(f"[Reroute] Obstacle at cx={obs_cx:.0f} — strafing {side}")
+            # Rotate so the obstacle slides to the far edge of the frame.
+            # Obstacle on the right → rotate left (omega<0, CCW): obstacle
+            # appears to move right in the camera, off the right edge.
+            # Obstacle on the left → rotate right (omega>0, CW).
+            self._reroute_omega_sign = -1 if obs_cx > fw / 2 else +1
+            side = "left" if self._reroute_omega_sign < 0 else "right"
+            print(f"[Reroute] Obstacle at cx={obs_cx:.0f} — going around via the {side}")
             if self.speaker:
                 self.speaker.say(f"Obstacle ahead. Going around to the {side}.")
 
-        # Emergency stop still wins — if ultrasonic sees something at close
-        # range, back off to BLOCKED rather than keep strafing into it.
+        # Ultrasonic always trumps camera. Close-range emergency → BLOCKED.
         if self._check_ultrasonic_obstacle():
             self.uart.send(cmd_stop())
             self._reset_reroute()
             self.transition(State.BLOCKED)
             return
 
-        # Hard timeout — don't get stuck strafing along a wall forever.
-        if now - self._reroute_start_time > 6.0:
-            print("[Reroute] Timed out — giving up.")
+        # Overall timeout: bail out rather than circle forever.
+        if now - self._reroute_start_time > 8.0:
+            print("[Reroute] Overall timeout — giving up.")
             if self.speaker:
                 self.speaker.say("I cannot find a way around. Stopping.")
             self.uart.send(cmd_stop())
@@ -916,8 +932,7 @@ class AlfredFSM:
             self.transition(State.IDLE)
             return
 
-        # Keep marker memory fresh while we move — if it stays visible during
-        # the strafe, the bearing update makes the approach smoother on exit.
+        # Keep marker memory fresh in every phase.
         if self.aruco_detector:
             markers = self.aruco_detector.detect(self._last_frame)
             if markers:
@@ -932,28 +947,103 @@ class AlfredFSM:
                 if tgt:
                     self._remember_marker(tgt, self._last_frame)
 
-        # Path-clear check: need a few consecutive clear frames before we
-        # trust it (one-frame flicker shouldn't bounce us out).
-        if not self._check_camera_obstacle():
-            self._reroute_clear_count += 1
-            if self._reroute_clear_count >= 3:
-                print("[Reroute] Path clear — resuming approach.")
-                if self.speaker:
-                    self.speaker.say("Path clear.")
-                target_state = self._reroute_from or State.ARUCO_APPROACH
-                self._reset_reroute()
-                self.transition(target_state)
-                return
-        else:
-            self._reroute_clear_count = 0
+        phase_elapsed = now - self._reroute_phase_start
 
-        # Pure sideways slide. Forward is 0 — we don't want to make progress
-        # toward the tag while something is still in front of us.
-        vy = self._reroute_strafe_dir * 30
-        self.uart.send(cmd_vector(0, vy, 0))
-        self.line_follower.debug_vx = 0
-        self.line_follower.debug_vy = vy
-        self.line_follower.debug_omega = 0
+        # ===== Phase 1: turn in place to face past the obstacle =====
+        if self._reroute_phase == "turn_away":
+            obs_cx = self._front_obstacle_cx()
+            done = False
+            if obs_cx is None:
+                # Obstacle no longer visible at all — we've rotated past it.
+                done = True
+            elif self._reroute_omega_sign < 0 and obs_cx > fw * 0.85:
+                # Rotating left; obstacle now at the right edge → aligned past.
+                done = True
+            elif self._reroute_omega_sign > 0 and obs_cx < fw * 0.15:
+                done = True
+            elif phase_elapsed > 1.8:
+                # Safety: don't spin forever if edge detection flickers.
+                print("[Reroute] turn_away phase timeout — driving anyway.")
+                done = True
+
+            if done:
+                self._reroute_phase = "drive_around"
+                self._reroute_phase_start = now
+                self._reroute_clear_count = 0
+            else:
+                omega = self._reroute_omega_sign * 25
+                self.uart.send(cmd_vector(0, 0, omega))
+                self.line_follower.debug_vx = 0
+                self.line_follower.debug_vy = 0
+                self.line_follower.debug_omega = omega
+                return
+
+        # ===== Phase 2: drive forward past the obstacle =====
+        if self._reroute_phase == "drive_around":
+            # Watch the path ahead. If the obstacle reappears (wrap-around,
+            # another obstacle), go back to turn_away with fresh direction.
+            if self._check_camera_obstacle():
+                self._reroute_clear_count = 0
+                # Re-enter turn_away with a new direction decision.
+                print("[Reroute] New obstacle during drive — re-rotating.")
+                self._reroute_phase = "turn_away"
+                self._reroute_phase_start = now
+                obs_cx = self._front_obstacle_cx()
+                if obs_cx is not None:
+                    self._reroute_omega_sign = -1 if obs_cx > fw / 2 else +1
+                return
+            else:
+                self._reroute_clear_count += 1
+
+            # Need the path clear for a short streak AND minimum drive time
+            # so we actually move past the obstacle, not just peek past it.
+            if self._reroute_clear_count >= 5 and phase_elapsed > 0.8:
+                self._reroute_phase = "turn_back"
+                self._reroute_phase_start = now
+            elif phase_elapsed > 3.0:
+                # Per-phase timeout.
+                self._reroute_phase = "turn_back"
+                self._reroute_phase_start = now
+            else:
+                self.uart.send(cmd_vector(25, 0, 0))
+                self.line_follower.debug_vx = 25
+                self.line_follower.debug_vy = 0
+                self.line_follower.debug_omega = 0
+                return
+
+        # ===== Phase 3: turn back toward the tag =====
+        if self._reroute_phase == "turn_back":
+            # Spin opposite direction. Stop the moment the target marker shows.
+            target_visible = False
+            if self.aruco_detector:
+                markers = self.aruco_detector.detect(self._last_frame)
+                if self._aruco_target_id is not None:
+                    target_visible = any(m["id"] == self._aruco_target_id for m in markers)
+                else:
+                    target_visible = bool(markers)
+
+            if target_visible:
+                print("[Reroute] Tag reacquired — resuming approach.")
+                if self.speaker:
+                    self.speaker.say("Back on track.")
+                self._reset_reroute()
+                self.transition(State.ARUCO_APPROACH)
+                return
+
+            if phase_elapsed > 2.5:
+                # Couldn't find it by pure rotation; let ARUCO_SEARCH take
+                # over (it already biases the spin by _aruco_last_cx).
+                print("[Reroute] turn_back complete without reacquisition — handing off to search.")
+                self._reset_reroute()
+                self.transition(State.ARUCO_SEARCH)
+                return
+
+            omega = -self._reroute_omega_sign * 25
+            self.uart.send(cmd_vector(0, 0, omega))
+            self.line_follower.debug_vx = 0
+            self.line_follower.debug_vy = 0
+            self.line_follower.debug_omega = omega
+            return
 
     def _tick_patrol(self):
         """Autonomous wander with person detection and gesture recognition."""
