@@ -422,14 +422,10 @@ class AlfredFSM:
             return not self.obstacle_detector.is_path_clear(self._last_frame)
         return False
 
-    def _front_obstacle_cx(self):
-        """Return the x-pixel centre of the largest obstacle in front, or None.
-
-        Used by REROUTING to decide which side to strafe. Falls back through
-        YOLO → contour-based ObstacleDetector.
-        """
+    def _get_front_obstacles(self):
+        """Helper — list biggest-first. Used by several REROUTING heuristics."""
         if self._last_frame is None:
-            return None
+            return []
         obstacles = []
         if self.yolo_detector:
             try:
@@ -441,20 +437,61 @@ class AlfredFSM:
                 obstacles = self.obstacle_detector.detect(self._last_frame)
             except Exception:
                 obstacles = []
-        if not obstacles:
-            return None
-
-        def _bbox_area(o):
+        def _area(o):
             if "area" in o:
                 return o["area"]
             _, _, bw, bh = o["bbox"]
             return bw * bh
+        return sorted(obstacles, key=_area, reverse=True)
 
-        biggest = max(obstacles, key=_bbox_area)
+    def _front_obstacle_cx(self):
+        """Return the x-pixel centre of the largest obstacle in front, or None.
+
+        Used by REROUTING to decide which side to strafe.
+        """
+        obstacles = self._get_front_obstacles()
+        if not obstacles:
+            return None
+        biggest = obstacles[0]
         if "center" in biggest:
             return float(biggest["center"][0])
         bx, _, bw, _ = biggest["bbox"]
         return bx + bw / 2.0
+
+    def _obstacle_is_close(self):
+        """Proximity estimate without depth sensors — is the obstacle close
+        enough that we should stop + rotate, or far enough to curve around?
+
+        Three independent cues, any one of which flags "close":
+          1. Ultrasonic < 50 cm (if sensor wired; most reliable when available).
+          2. Obstacle bbox bottom > 82 % of frame height (ground-plane heuristic —
+             a closer object's bottom sits lower in the image).
+          3. Obstacle bbox area > 18 % of frame area (large visual footprint).
+        """
+        if self._last_frame is None:
+            return True  # safe default: assume close if we can't tell
+
+        # Ultrasonic is the most trustworthy distance cue. Only use it if
+        # the sensor is actually returning a reading (dist > 0).
+        if self.uart:
+            dist_cm = self.uart.get_distance()
+            if 0 < dist_cm < 50:
+                return True
+
+        obstacles = self._get_front_obstacles()
+        if not obstacles:
+            return False  # nothing visible — treat as far
+
+        h, w = self._last_frame.shape[:2]
+        frame_area = float(w * h)
+        for obs in obstacles[:3]:  # only the three biggest matter
+            bx, by, bw, bh = obs["bbox"]
+            bbox_bottom = by + bh
+            if bbox_bottom > h * 0.82:
+                return True
+            if (bw * bh) > frame_area * 0.18:
+                return True
+        return False
 
     def _remember_marker(self, marker, frame):
         """Cache the marker's current cx/size so a later search can spin
@@ -869,22 +906,25 @@ class AlfredFSM:
                 self.transition(State.IDLE)
 
     def _tick_rerouting(self):
-        """Three-phase obstacle-avoidance manoeuvre.
+        """Hybrid obstacle-avoidance manoeuvre — curves smoothly if the
+        obstacle is still far, falls back to rotate-drive-rotate if close.
 
-        The camera always faces the direction of motion so we see what we're
-        about to hit — strictly safer than pure mecanum strafe. Sub-phases:
+        On first tick, `_obstacle_is_close` picks between:
 
-          turn_away    Rotate in place until the obstacle is at the frame edge
-                       (robot now faces parallel to it, or past it).
-          drive_around Drive forward (camera leads); exits when the forward
-                       path stays clear for ~5 frames or a per-phase timeout.
-          turn_back    Rotate back in the opposite direction looking for the
-                       tag. Exits as soon as the tag appears, or on timeout
-                       → ARUCO_SEARCH (which further biases toward the
-                       last-known bearing).
+          curve        Smooth arc around the obstacle: vx=22 forward, omega
+                       proportional to turn direction, small vy strafe. Camera
+                       stays roughly forward, so the tag often remains in
+                       peripheral view. If distance closes mid-curve the
+                       phase auto-switches to turn_away for safety.
 
-        Marker memory keeps updating during all three phases so any brief
-        glimpse of the tag refines the bearing we spin back toward.
+          turn_away    Rotate in place until the obstacle is at the frame edge.
+          drive_around Drive forward (camera leads); exit on clear path +
+                       minimum drive time, or per-phase timeout.
+          turn_back    Rotate back looking for the tag; exit on acquisition,
+                       else hand off to ARUCO_SEARCH with bearing-biased spin.
+
+        Marker memory keeps updating through every phase so a brief glimpse
+        of the tag refines the bearing used by the fallback search.
         """
         if self._last_frame is None:
             self.uart.send(cmd_stop())
@@ -893,10 +933,9 @@ class AlfredFSM:
         now = time.monotonic()
         fw = self._last_frame.shape[1]
 
-        # First-tick setup: pick rotation direction + announce.
+        # First-tick setup: pick rotation direction + curve-vs-rotate mode.
         if self._reroute_start_time is None:
             self._reroute_start_time = now
-            self._reroute_phase = "turn_away"
             self._reroute_phase_start = now
             self._reroute_clear_count = 0
             obs_cx = self._front_obstacle_cx()
@@ -905,15 +944,23 @@ class AlfredFSM:
                 self._reset_reroute()
                 self.transition(self._reroute_from or State.ARUCO_APPROACH)
                 return
-            # Rotate so the obstacle slides to the far edge of the frame.
-            # Obstacle on the right → rotate left (omega<0, CCW): obstacle
-            # appears to move right in the camera, off the right edge.
-            # Obstacle on the left → rotate right (omega>0, CW).
+            # Direction convention throughout REROUTING:
+            #   obstacle on right → pass it on the LEFT → rotation sign -1
+            #   obstacle on left  → pass it on the RIGHT → rotation sign +1
             self._reroute_omega_sign = -1 if obs_cx > fw / 2 else +1
             side = "left" if self._reroute_omega_sign < 0 else "right"
-            print(f"[Reroute] Obstacle at cx={obs_cx:.0f} — going around via the {side}")
-            if self.speaker:
-                self.speaker.say(f"Obstacle ahead. Going around to the {side}.")
+
+            # Decide avoidance mode based on how close the obstacle is.
+            if self._obstacle_is_close():
+                self._reroute_phase = "turn_away"
+                print(f"[Reroute] Obstacle close (cx={obs_cx:.0f}) — stopping and rotating to go {side}")
+                if self.speaker:
+                    self.speaker.say(f"Obstacle close. Going around to the {side}.")
+            else:
+                self._reroute_phase = "curve"
+                print(f"[Reroute] Obstacle far (cx={obs_cx:.0f}) — smooth curve around to the {side}")
+                if self.speaker:
+                    self.speaker.say(f"Curving around to the {side}.")
 
         # Ultrasonic always trumps camera. Close-range emergency → BLOCKED.
         if self._check_ultrasonic_obstacle():
@@ -948,6 +995,60 @@ class AlfredFSM:
                     self._remember_marker(tgt, self._last_frame)
 
         phase_elapsed = now - self._reroute_phase_start
+
+        # ===== Optional Phase 0: smooth curve (only when obstacle was far) =====
+        if self._reroute_phase == "curve":
+            # Continuous safety check: if the obstacle closed the distance
+            # (we got too close to curve comfortably), abort to rotate-drive.
+            if self._obstacle_is_close():
+                print("[Reroute] Obstacle closed during curve — bailing to rotate.")
+                if self.speaker:
+                    self.speaker.say("Too close — stopping to turn.")
+                self.uart.send(cmd_stop())
+                self._reroute_phase = "turn_away"
+                self._reroute_phase_start = now
+                self._reroute_clear_count = 0
+                return
+
+            # Path-clear check — same streak logic as drive_around.
+            if not self._check_camera_obstacle():
+                self._reroute_clear_count += 1
+                # Minimum curve time 0.5 s + 5 clear frames means we committed
+                # to the arc before exiting.
+                if self._reroute_clear_count >= 5 and phase_elapsed > 0.5:
+                    # If the tag is already visible after the curve, resume
+                    # immediately; otherwise let ARUCO_APPROACH fall through
+                    # to bearing-biased ARUCO_SEARCH.
+                    print("[Reroute] Curve cleared — resuming approach.")
+                    if self.speaker:
+                        self.speaker.say("Path clear.")
+                    self._reset_reroute()
+                    self.transition(State.ARUCO_APPROACH)
+                    return
+            else:
+                self._reroute_clear_count = 0
+
+            # Per-phase timeout — if the curve didn't finish in 3.5 s it's
+            # probably not the right manoeuvre. Switch to the discrete
+            # rotate-drive-rotate. Keep the direction we chose.
+            if phase_elapsed > 3.5:
+                print("[Reroute] Curve timeout — falling back to rotate-drive.")
+                self._reroute_phase = "turn_away"
+                self._reroute_phase_start = now
+                self._reroute_clear_count = 0
+                return
+
+            # Arc: forward + rotate away. omega_sign < 0 curves the robot
+            # left (CCW), positive curves it right (CW). Small vy adds a
+            # gentle mecanum strafe in the same direction, widening the arc.
+            vx = 22
+            omega = self._reroute_omega_sign * 12
+            vy = self._reroute_omega_sign * 8
+            self.uart.send(cmd_vector(vx, vy, omega))
+            self.line_follower.debug_vx = vx
+            self.line_follower.debug_vy = vy
+            self.line_follower.debug_omega = omega
+            return
 
         # ===== Phase 1: turn in place to face past the obstacle =====
         if self._reroute_phase == "turn_away":
