@@ -125,6 +125,16 @@ Camera System
 - OpenAI Vision scene analyzer: periodic AI-powered scene understanding during patrol/search states
 - Person detection: MediaPipe face + hand + 6 gestures (when installed)
 
+ArUco approach with camera-based obstacle avoidance
+
+- During `ARUCO_APPROACH` and `ARUCO_SEARCH`, every tick runs two independent obstacle checks:
+  1. **Ultrasonic** (`_check_ultrasonic_obstacle`) — hard emergency stop at < 20 cm, transitions to `BLOCKED` (stop-and-wait). Only active when HC-SR04 is wired; returns False otherwise.
+  2. **Camera** (`_check_camera_obstacle`) — YOLO centre-path-clear check (primary) with contour-based `ObstacleDetector` fallback. If something blocks the centre of the frame, transitions to `REROUTING` (strafe around).
+- `REROUTING` behavior (`_tick_rerouting`): picks a strafe direction once on entry based on the largest obstacle's x-centre (`_front_obstacle_cx`) — obstacle on right half → strafe left (`vy<0`), left half → strafe right (`vy>0`). Pure sideways slide at `vy=±30`, no forward motion. Exits after the camera reports the path clear for 3 consecutive frames, or after a 6 s timeout. On timeout says "I cannot find a way around" and goes to `IDLE`.
+- **Marker memory** (`_remember_marker`): every time the target marker is detected in ARUCO_SEARCH, ARUCO_APPROACH, or REROUTING, we cache `_aruco_last_cx` / `_aruco_last_size` / `_aruco_last_frame_w` / `_aruco_last_seen_time`. When `_tick_aruco_search` has no marker in the current frame, it biases its rotation toward the last-known bearing: `omega = -8` if the marker was in the left half of the frame, else `+8`. Memory expires after 10 s.
+- On a fresh `go to marker N` voice command, `transition()` clears both the bearing memory and the reroute state so a new target doesn't inherit stale data. "Stop" intent also clears reroute state.
+- **Limitation (known):** the ultrasonic is forward-facing, so while strafing sideways we have no side collision sensing. User plans to add 3 ultrasonic sensors later for surround coverage. Until then REROUTING can scrape a side obstacle — the 6 s timeout is the safety net.
+
 Person-follow behavior (FSM state `PERSON_APPROACH`, intent `come_here` / "follow me")
 
 - Uses MediaPipe face detection. Largest face = closest person.

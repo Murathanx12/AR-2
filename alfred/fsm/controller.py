@@ -263,6 +263,19 @@ class AlfredFSM:
         self._person_lost_since = None
         self._person_greeted = False
 
+        # Marker memory — keeps last-known bearing so search after a reroute
+        # or brief occlusion spins the *right* way, not a blind sweep.
+        self._aruco_last_cx = None
+        self._aruco_last_size = None
+        self._aruco_last_frame_w = None
+        self._aruco_last_seen_time = None
+
+        # Camera-based rerouting (strafe around visible obstacle)
+        self._reroute_start_time = None
+        self._reroute_strafe_dir = 0   # -1 = strafe left, +1 = strafe right
+        self._reroute_clear_count = 0
+        self._reroute_from = None       # state to return to once path clears
+
         # Dispatch table
         self._tick_dispatch = {
             State.IDLE:             self._tick_idle,
@@ -403,6 +416,54 @@ class AlfredFSM:
             return not self.obstacle_detector.is_path_clear(self._last_frame)
         return False
 
+    def _front_obstacle_cx(self):
+        """Return the x-pixel centre of the largest obstacle in front, or None.
+
+        Used by REROUTING to decide which side to strafe. Falls back through
+        YOLO → contour-based ObstacleDetector.
+        """
+        if self._last_frame is None:
+            return None
+        obstacles = []
+        if self.yolo_detector:
+            try:
+                obstacles = self.yolo_detector.get_obstacles(self._last_frame)
+            except Exception:
+                obstacles = []
+        if not obstacles and self.obstacle_detector:
+            try:
+                obstacles = self.obstacle_detector.detect(self._last_frame)
+            except Exception:
+                obstacles = []
+        if not obstacles:
+            return None
+
+        def _bbox_area(o):
+            if "area" in o:
+                return o["area"]
+            _, _, bw, bh = o["bbox"]
+            return bw * bh
+
+        biggest = max(obstacles, key=_bbox_area)
+        if "center" in biggest:
+            return float(biggest["center"][0])
+        bx, _, bw, _ = biggest["bbox"]
+        return bx + bw / 2.0
+
+    def _remember_marker(self, marker, frame):
+        """Cache the marker's current cx/size so a later search can spin
+        toward its last-known bearing instead of sweeping blindly."""
+        self._aruco_last_cx = marker["center"][0]
+        self._aruco_last_size = marker["size"]
+        self._aruco_last_frame_w = frame.shape[1]
+        self._aruco_last_seen_time = time.monotonic()
+
+    def _reset_reroute(self):
+        self._reroute_start_time = None
+        self._reroute_strafe_dir = 0
+        self._reroute_clear_count = 0
+        self._reroute_from = None
+
     def tick(self):
         """Run one FSM cycle: read sensors, dispatch state handler, update expression."""
         # Read camera frame (shared across states)
@@ -459,6 +520,7 @@ class AlfredFSM:
             self.line_follower.debug_vy = 0
             self.line_follower.debug_omega = 0
             self._aruco_announced_id = None
+            self._reset_reroute()
             if self.speaker:
                 self.speaker.stop()
                 self.speaker.say("stop")
@@ -552,6 +614,12 @@ class AlfredFSM:
                     self._aruco_target_id = None
                     print(f"[ArUco] Following any visible marker")
                 self._aruco_announced_id = None  # fresh command, re-announce on acquire
+                # Clear stale bearing memory from a previous target.
+                self._aruco_last_cx = None
+                self._aruco_last_size = None
+                self._aruco_last_frame_w = None
+                self._aruco_last_seen_time = None
+                self._reset_reroute()
                 if self.aruco_approach:
                     self.aruco_approach.reset()
             elif target == State.PERSON_APPROACH:
@@ -671,15 +739,24 @@ class AlfredFSM:
                     if self.speaker and already != target["id"]:
                         self.speaker.say(f"Found marker {target['id']}. Approaching.")
                         self._aruco_announced_id = target["id"]
+                    self._remember_marker(target, self._last_frame)
                     self.transition(State.ARUCO_APPROACH)
                     return
 
-        # Slow rotation to scan. Was 15 — at real camera latency the marker
-        # flew through the FOV between frames. 8 gives the detector time.
-        self.uart.send(cmd_vector(0, 0, 8))
+        # Direction-biased search. If we've seen the marker recently, spin
+        # back toward its last-known bearing rather than the default (right).
+        # Previous sign discipline: omega > 0 = spin right (CW).
+        omega = 8
+        if (self._aruco_last_cx is not None and self._aruco_last_frame_w and
+                self._aruco_last_seen_time is not None and
+                time.monotonic() - self._aruco_last_seen_time < 10.0):
+            if self._aruco_last_cx < self._aruco_last_frame_w / 2:
+                omega = -8  # marker was on my left — rotate left to re-acquire
+
+        self.uart.send(cmd_vector(0, 0, omega))
         self.line_follower.debug_vx = 0
         self.line_follower.debug_vy = 0
-        self.line_follower.debug_omega = 8
+        self.line_follower.debug_omega = omega
 
     def _tick_aruco_approach(self):
         """Drive toward detected ArUco marker — center first, then approach, then hold."""
@@ -687,9 +764,19 @@ class AlfredFSM:
             self.transition(State.IDLE)
             return
 
-        # R4: Check ultrasonic obstacle while approaching
+        # R4: Hard-stop on ultrasonic — that's a "close enough to collide" signal.
         if self._check_ultrasonic_obstacle():
             self.transition(State.BLOCKED)
+            return
+
+        # Camera-based obstacle avoidance: if something (person / box / chair /
+        # YOLO-labelled object) is sitting in the centre of the path, strafe
+        # around it instead of driving through. We remember the marker's last
+        # bearing first so the reroute exit knows which way to resume.
+        if self._check_camera_obstacle():
+            self._reroute_from = State.ARUCO_APPROACH
+            self._reset_reroute()  # next REROUTING tick will initialise fresh
+            self.transition(State.REROUTING)
             return
 
         markers = self.aruco_detector.detect(self._last_frame)
@@ -710,9 +797,14 @@ class AlfredFSM:
                 # See markers but not our target
                 seen = [m["id"] for m in markers]
                 print(f"[ArUco] See {seen}, want {self._aruco_target_id}")
-            # Lost target — search again
+            # Lost target — search again. _tick_aruco_search will spin back
+            # toward the last-known bearing.
             self.transition(State.ARUCO_SEARCH)
             return
+
+        # Remember where/how big the marker is so later search/reroute can
+        # recover without a blind spin.
+        self._remember_marker(target_marker, self._last_frame)
 
         # Visual approach
         h, w = self._last_frame.shape[:2]
@@ -760,27 +852,108 @@ class AlfredFSM:
                 self.transition(State.ARUCO_APPROACH)
             elif self._previous_state == State.ARUCO_SEARCH:
                 self.transition(State.ARUCO_SEARCH)
+            elif self._previous_state == State.REROUTING:
+                # Ultrasonic tripped mid-reroute — camera path might still be
+                # blocked, so re-enter REROUTING to keep trying. _reset_reroute
+                # on re-entry will pick a fresh strafe direction.
+                self.transition(State.REROUTING)
             else:
                 self.transition(State.IDLE)
 
     def _tick_rerouting(self):
-        """Compute avoidance manoeuvre around obstacle."""
-        if self.obstacle_avoider and self.obstacle_detector and self._last_frame is not None:
-            obstacles = self.obstacle_detector.detect(self._last_frame)
-            vx, vy, omega = self.obstacle_avoider.compute_avoidance(obstacles)
+        """Camera-based strafe-around-obstacle manoeuvre.
 
-            if not self.obstacle_avoider.is_rerouting():
-                self.line_follower.reset()
-                self.transition(State.FOLLOWING)
+        Picks a strafe direction (away from the biggest obstacle) on first
+        tick, then slides sideways until the forward path has been clear for
+        a few consecutive frames. Marker detection keeps running so we update
+        the bearing memory as we move — and the exit transitions back into
+        ARUCO_APPROACH, which will re-acquire the marker (either directly or
+        via ARUCO_SEARCH with direction-biased spin).
+        """
+        if self._last_frame is None:
+            # No frame yet — nothing to decide on.
+            self.uart.send(cmd_stop())
+            return
+
+        now = time.monotonic()
+        fw = self._last_frame.shape[1]
+
+        # Fresh entry: pick strafe direction once, announce, start clock.
+        if self._reroute_start_time is None:
+            self._reroute_start_time = now
+            self._reroute_clear_count = 0
+            obs_cx = self._front_obstacle_cx()
+            if obs_cx is None:
+                # Camera reports nothing in the path — go straight back to
+                # approach instead of strafing blindly.
+                self._reset_reroute()
+                self.transition(self._reroute_from or State.ARUCO_APPROACH)
                 return
+            # Strafe AWAY from the obstacle. Mecanum convention: vy > 0 =
+            # strafe right. Obstacle centre on right half → vy should be
+            # negative (go left); on left half → vy positive (go right).
+            self._reroute_strafe_dir = -1 if obs_cx > fw / 2 else +1
+            side = "left" if self._reroute_strafe_dir < 0 else "right"
+            print(f"[Reroute] Obstacle at cx={obs_cx:.0f} — strafing {side}")
+            if self.speaker:
+                self.speaker.say(f"Obstacle ahead. Going around to the {side}.")
 
-            self.uart.send(cmd_vector(max(10, vx + 20), vy, omega))
-            self.line_follower.debug_vx = vx + 20
-            self.line_follower.debug_vy = vy
-            self.line_follower.debug_omega = omega
+        # Emergency stop still wins — if ultrasonic sees something at close
+        # range, back off to BLOCKED rather than keep strafing into it.
+        if self._check_ultrasonic_obstacle():
+            self.uart.send(cmd_stop())
+            self._reset_reroute()
+            self.transition(State.BLOCKED)
+            return
+
+        # Hard timeout — don't get stuck strafing along a wall forever.
+        if now - self._reroute_start_time > 6.0:
+            print("[Reroute] Timed out — giving up.")
+            if self.speaker:
+                self.speaker.say("I cannot find a way around. Stopping.")
+            self.uart.send(cmd_stop())
+            self._reset_reroute()
+            self.transition(State.IDLE)
+            return
+
+        # Keep marker memory fresh while we move — if it stays visible during
+        # the strafe, the bearing update makes the approach smoother on exit.
+        if self.aruco_detector:
+            markers = self.aruco_detector.detect(self._last_frame)
+            if markers:
+                tgt = None
+                if self._aruco_target_id is not None:
+                    for m in markers:
+                        if m["id"] == self._aruco_target_id:
+                            tgt = m
+                            break
+                else:
+                    tgt = max(markers, key=lambda m: m["size"])
+                if tgt:
+                    self._remember_marker(tgt, self._last_frame)
+
+        # Path-clear check: need a few consecutive clear frames before we
+        # trust it (one-frame flicker shouldn't bounce us out).
+        if not self._check_camera_obstacle():
+            self._reroute_clear_count += 1
+            if self._reroute_clear_count >= 3:
+                print("[Reroute] Path clear — resuming approach.")
+                if self.speaker:
+                    self.speaker.say("Path clear.")
+                target_state = self._reroute_from or State.ARUCO_APPROACH
+                self._reset_reroute()
+                self.transition(target_state)
+                return
         else:
-            self.line_follower.reset()
-            self.transition(State.FOLLOWING)
+            self._reroute_clear_count = 0
+
+        # Pure sideways slide. Forward is 0 — we don't want to make progress
+        # toward the tag while something is still in front of us.
+        vy = self._reroute_strafe_dir * 30
+        self.uart.send(cmd_vector(0, vy, 0))
+        self.line_follower.debug_vx = 0
+        self.line_follower.debug_vy = vy
+        self.line_follower.debug_omega = 0
 
     def _tick_patrol(self):
         """Autonomous wander with person detection and gesture recognition."""
