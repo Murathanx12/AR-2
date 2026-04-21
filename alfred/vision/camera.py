@@ -1,6 +1,8 @@
 """Camera capture manager using OpenCV."""
 
 import logging
+import time
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,9 @@ class CameraManager:
         self.resolution = resolution
         self.fps = fps
         self._cap = None
+        # Rolling timestamps of the last N frames for a live FPS estimate.
+        self._frame_times = deque(maxlen=30)
+        self._last_fps_log = 0.0
 
     def open(self):
         """Open the camera device and configure resolution/fps.
@@ -39,14 +44,22 @@ class CameraManager:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
                 cap.set(cv2.CAP_PROP_FPS, self.fps)
+                # MJPG is much cheaper to decode than YUYV on USB 2.0, which
+                # is what gated us to very low effective FPS at 1080p.
+                try:
+                    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+                    cap.set(cv2.CAP_PROP_FOURCC, fourcc)
+                except Exception:
+                    pass
                 ret, frame = cap.read()
                 if ret and frame is not None:
                     self._cap = cap
                     self.camera_index = idx
                     actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                     actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    logger.info(f"Camera opened on index {idx} at {actual_w}x{actual_h}")
-                    print(f"[Camera] Opened on index {idx} at {actual_w}x{actual_h}")
+                    actual_fps = self._cap.get(cv2.CAP_PROP_FPS)
+                    logger.info(f"Camera opened on index {idx} at {actual_w}x{actual_h} (driver fps={actual_fps:.0f})")
+                    print(f"[Camera] Opened on index {idx} at {actual_w}x{actual_h} (driver fps={actual_fps:.0f})")
                     return True
                 cap.release()
             else:
@@ -64,7 +77,25 @@ class CameraManager:
         ret, frame = self._cap.read()
         if not ret:
             return None
+        now = time.monotonic()
+        self._frame_times.append(now)
+        # Log effective FPS every ~5 s so drops are visible in the log without
+        # flooding.
+        if len(self._frame_times) >= 10 and (now - self._last_fps_log) > 5.0:
+            fps = self.actual_fps
+            logger.info(f"Camera effective FPS ≈ {fps:.1f} (target {self.fps})")
+            self._last_fps_log = now
         return frame
+
+    @property
+    def actual_fps(self):
+        """Rolling FPS estimate from recent read_frame() calls."""
+        if len(self._frame_times) < 2:
+            return 0.0
+        span = self._frame_times[-1] - self._frame_times[0]
+        if span <= 0:
+            return 0.0
+        return (len(self._frame_times) - 1) / span
 
     def close(self):
         """Release the camera device."""

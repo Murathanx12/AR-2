@@ -664,11 +664,12 @@ class AlfredFSM:
                     self.transition(State.ARUCO_APPROACH)
                     return
 
-        # Slow rotation to scan — speed 15 (was 30, too fast)
-        self.uart.send(cmd_vector(0, 0, 15))
+        # Slow rotation to scan. Was 15 — at real camera latency the marker
+        # flew through the FOV between frames. 8 gives the detector time.
+        self.uart.send(cmd_vector(0, 0, 8))
         self.line_follower.debug_vx = 0
         self.line_follower.debug_vy = 0
-        self.line_follower.debug_omega = 15
+        self.line_follower.debug_omega = 8
 
     def _tick_aruco_approach(self):
         """Drive toward detected ArUco marker — center first, then approach, then hold."""

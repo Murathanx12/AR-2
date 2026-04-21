@@ -23,13 +23,31 @@ except ImportError:
 
 
 class ArucoApproach:
-    """Drives toward an ArUco marker with center-first behavior."""
+    """Drives toward an ArUco marker with center-first behavior.
 
-    # Distance thresholds (in marker pixel size)
-    STOP_SIZE = 140        # marker this big = close enough, stop
-    HOLD_MIN = 120         # if marker shrinks below this, move closer again
-    HOLD_MAX = 160         # if marker grows above this, back up slightly
-    CENTER_TOLERANCE = 0.08  # 8% of frame width = "centered"
+    Distance is computed from marker pixel size using the pinhole model:
+        distance_m = (physical_marker_m * focal_length_px) / pixel_size
+    focal_length_px is approximated from frame width (≈0.8·width) — good
+    enough for a ~20 cm stop target on typical USB webcams. Using real
+    distance instead of raw pixel size keeps thresholds resolution-independent;
+    the old pixel-based thresholds (STOP_SIZE=140) caused the robot to enter
+    hold-mode and back up for any marker visible at 1920×1080.
+    """
+
+    # Physical geometry of the printed ArUco marker. Adjust to match whatever
+    # marker size you're actually using.
+    PHYSICAL_MARKER_M = 0.05     # 5 cm tag
+    FOCAL_RATIO = 0.8            # focal_px ≈ 0.8 · frame_width
+
+    # Target stop distance ≈ 20 cm with a small dead band so the robot doesn't
+    # oscillate forward/back around the set point. Ultrasonic will refine this
+    # once wired up.
+    STOP_DIST_M = 0.20
+    HOLD_NEAR_M = 0.15           # closer than this → back up
+    HOLD_FAR_M  = 0.30           # farther than this while holding → nudge forward
+    APPROACH_REENGAGE_M = 0.35   # drifted past this → leave hold, re-approach
+
+    CENTER_TOLERANCE = 0.08      # 8 % of frame width = "centered"
 
     def __init__(self):
         self._smooth_cx = None
@@ -37,22 +55,34 @@ class ArucoApproach:
         self._alpha = 0.35  # EMA smoothing
         self._holding = False  # True when maintaining distance
 
+    def _distance_m(self, pixel_size, frame_width):
+        if pixel_size <= 0:
+            return float("inf")
+        focal_px = self.FOCAL_RATIO * frame_width
+        return (self.PHYSICAL_MARKER_M * focal_px) / pixel_size
+
+    def _forward_speed(self, dist_m):
+        """Ramp: fast when far, creep through the final 10 cm."""
+        if dist_m > 1.0:
+            return 40
+        if dist_m > 0.5:
+            return 30
+        if dist_m > 0.30:
+            return 20
+        return 14
+
     def compute_visual_approach(self, marker, frame_width, frame_height):
         """Compute motor command to approach marker.
 
         Logic:
         1. If marker not centered: rotate to center it (no forward motion)
         2. If centered: drive forward, slow down as we get closer
-        3. If close enough: stop and hold distance
-
-        Returns:
-            Tuple (vx, vy, omega) or None if arrived and holding.
-            Also returns state string for logging.
+        3. If within STOP_DIST_M: stop and hold distance
+        Returns (vx, vy, omega). vx > 0 = forward, vx < 0 = reverse.
         """
         raw_cx, _ = marker["center"]
         raw_size = marker["size"]
 
-        # Temporal smoothing
         if self._smooth_cx is None:
             self._smooth_cx = raw_cx
             self._smooth_size = raw_size
@@ -63,63 +93,51 @@ class ArucoApproach:
         cx = self._smooth_cx
         size = self._smooth_size
 
-        # Center error: -1 (marker on left) to +1 (marker on right)
         cx_img = frame_width / 2.0
         error_x = (cx - cx_img) / (frame_width / 2.0)
 
-        # Log for debugging
-        log_event(f"ARUCO: cx_err={error_x:+.2f} size={size:.0f} hold={self._holding}")
+        dist_m = self._distance_m(size, frame_width)
+        log_event(f"ARUCO: cx_err={error_x:+.2f} size={size:.0f}px dist={dist_m:.2f}m hold={self._holding}")
 
         # === HOLD MODE: maintain distance ===
         if self._holding:
-            if size < self.HOLD_MIN:
-                # Marker moved away — approach again
+            if dist_m > self.APPROACH_REENGAGE_M:
                 self._holding = False
-                log_event(f"ARUCO: marker moved away (size={size:.0f}), re-approaching")
-            elif size > self.HOLD_MAX:
-                # Too close — back up slightly
-                omega = int(-20 * error_x)  # stay centered while backing
-                log_event(f"ARUCO: too close (size={size:.0f}), backing up")
+                log_event(f"ARUCO: marker moved away (dist={dist_m:.2f}m), re-approaching")
+            elif dist_m < self.HOLD_NEAR_M:
+                omega = int(-20 * error_x)
+                log_event(f"ARUCO: too close (dist={dist_m:.2f}m), backing up")
                 return (-15, 0, omega)
+            elif dist_m > self.HOLD_FAR_M:
+                omega = int(15 * error_x)
+                log_event(f"ARUCO: drifted out (dist={dist_m:.2f}m), nudging forward")
+                return (10, 0, omega)
             else:
-                # Good distance — just stay centered
                 if abs(error_x) > self.CENTER_TOLERANCE:
                     omega = int(20 * error_x)
                     return (0, 0, omega)
-                return (0, 0, 0)  # perfect — hold still
+                return (0, 0, 0)
 
         # === CENTERING: turn to face marker ===
         if abs(error_x) > self.CENTER_TOLERANCE:
-            # Turn to center marker — proportional speed
             omega = int(30 * error_x)
             omega = max(-30, min(30, omega))
 
-            # If very off-center, don't move forward at all
             if abs(error_x) > 0.3:
                 log_event(f"ARUCO: centering (err={error_x:+.2f}, omega={omega})")
                 return (0, 0, omega)
 
-            # Slightly off — slow forward + steer
-            size_ratio = min(1.0, size / self.STOP_SIZE)
-            speed = max(10, int(35 * (1.0 - size_ratio * 0.6)))
+            speed = self._forward_speed(dist_m)
             return (speed, 0, omega)
 
         # === APPROACH: centered, drive forward ===
-        if size > self.STOP_SIZE:
-            # Arrived — enter hold mode
+        if dist_m <= self.STOP_DIST_M:
             self._holding = True
-            log_event(f"ARUCO: arrived! size={size:.0f}, entering hold mode")
+            log_event(f"ARUCO: arrived! dist={dist_m:.2f}m, entering hold mode")
             return (0, 0, 0)
 
-        # Drive forward, speed proportional to distance
-        size_ratio = min(1.0, size / self.STOP_SIZE)
-        speed = max(12, int(40 * (1.0 - size_ratio * 0.5)))
-
-        # Creep when very close
-        if size_ratio > 0.75:
-            speed = min(speed, 18)
-
-        log_event(f"ARUCO: approaching (speed={speed}, size_ratio={size_ratio:.2f})")
+        speed = self._forward_speed(dist_m)
+        log_event(f"ARUCO: approaching (speed={speed}, dist={dist_m:.2f}m)")
         return (speed, 0, 0)
 
     def is_holding(self):

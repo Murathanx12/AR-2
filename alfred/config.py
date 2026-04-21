@@ -84,10 +84,13 @@ class VoiceConfig:
 class VisionConfig:
     """Vision subsystem."""
     camera_index: int = 1
-    resolution: Tuple[int, int] = (1920, 1080)
-    fps: int = 30
+    # 1280x720 @ 24fps is enough for ArUco detection and keeps the Pi+USB
+    # camera pipeline responsive. 1920x1080 caused visible capture lag and
+    # made marker tracking oscillate.
+    resolution: Tuple[int, int] = (1280, 720)
+    fps: int = 24
     aruco_dict: str = "DICT_4X4_50"
-    aruco_stop_size: int = 150  # pixel size at which marker = "arrived"
+    aruco_stop_size: int = 150  # legacy, unused — see ArucoApproach.STOP_DIST_M
     bev_src_points: Tuple[Tuple[int, int], ...] = ()
     bev_dst_points: Tuple[Tuple[int, int], ...] = ()
 
