@@ -458,6 +458,72 @@ class AlfredFSM:
         bx, _, bw, _ = biggest["bbox"]
         return bx + bw / 2.0
 
+    def _choose_reroute_side(self):
+        """Pick which side to pass the obstacle on.
+
+        Returns -1 to pass on the **left** (rotate CCW, negative omega),
+        +1 to pass on the **right** (rotate CW, positive omega).
+
+        Three signals, combined in this priority order:
+          1. Lateral clearance — for each side, how much empty horizontal
+             space is between the obstacle and the frame edge (reduced by
+             any secondary obstacle sitting in the "escape lane"). If one
+             side has at least 1.5× the clearance of the other, that wins
+             outright — we're not going to squeeze past a wall.
+          2. Tag bearing memory — if `_aruco_last_cx` is fresh, passing on
+             the same side as the tag is a shorter path back. Used as a
+             tiebreaker when clearances are comparable.
+          3. Geometric fallback — obstacle on right half → pass left,
+             obstacle on left half → pass right (the simple mirror).
+        """
+        if self._last_frame is None:
+            return -1
+        obstacles = self._get_front_obstacles()
+        if not obstacles:
+            return -1
+
+        h, w = self._last_frame.shape[:2]
+        bx, by, bw, bh = obstacles[0]["bbox"]
+        obs_cx = bx + bw / 2.0
+
+        # Raw clearance: space between obstacle edge and frame edge.
+        left_clearance = max(0.0, bx)
+        right_clearance = max(0.0, w - (bx + bw))
+
+        # Shrink the clearance on whichever side has a secondary obstacle
+        # sitting in the escape lane. (Obstacle entirely to the left of the
+        # main one → narrows the left-lane usable gap.)
+        for o in obstacles[1:]:
+            ox, _, ow, _ = o["bbox"]
+            if ox + ow <= bx:           # whole thing is left of the main obstacle
+                left_clearance = min(left_clearance, bx - (ox + ow))
+            elif ox >= bx + bw:         # whole thing is right of the main
+                right_clearance = min(right_clearance, ox - (bx + bw))
+
+        # Tag-bearing preference (only if memory is recent — <10 s old).
+        tag_hint = 0
+        if (self._aruco_last_cx is not None and self._aruco_last_frame_w and
+                self._aruco_last_seen_time is not None and
+                time.monotonic() - self._aruco_last_seen_time < 10.0):
+            tag_frac = self._aruco_last_cx / self._aruco_last_frame_w
+            if tag_frac < 0.45:
+                tag_hint = -1
+            elif tag_frac > 0.55:
+                tag_hint = +1
+
+        # Decision: clearance dominates if one side is clearly better.
+        if left_clearance > right_clearance * 1.5:
+            return -1
+        if right_clearance > left_clearance * 1.5:
+            return +1
+
+        # Close call → use the tag-side tiebreaker.
+        if tag_hint != 0:
+            return tag_hint
+
+        # No strong signal either way — fall back to the original mirror.
+        return -1 if obs_cx > w / 2 else +1
+
     def _obstacle_is_close(self):
         """Proximity estimate without depth sensors — is the obstacle close
         enough that we should stop + rotate, or far enough to curve around?
@@ -945,9 +1011,13 @@ class AlfredFSM:
                 self.transition(self._reroute_from or State.ARUCO_APPROACH)
                 return
             # Direction convention throughout REROUTING:
-            #   obstacle on right → pass it on the LEFT → rotation sign -1
-            #   obstacle on left  → pass it on the RIGHT → rotation sign +1
-            self._reroute_omega_sign = -1 if obs_cx > fw / 2 else +1
+            #   -1 = pass the obstacle on the LEFT (rotate CCW)
+            #   +1 = pass the obstacle on the RIGHT (rotate CW)
+            # _choose_reroute_side weighs lateral clearance first, then tag
+            # bearing memory, then a default geometric mirror — so the robot
+            # favours the side with more room, and uses the shorter path
+            # back to the tag as a tiebreaker.
+            self._reroute_omega_sign = self._choose_reroute_side()
             side = "left" if self._reroute_omega_sign < 0 else "right"
 
             # Decide avoidance mode based on how close the obstacle is.
@@ -1085,13 +1155,12 @@ class AlfredFSM:
             # another obstacle), go back to turn_away with fresh direction.
             if self._check_camera_obstacle():
                 self._reroute_clear_count = 0
-                # Re-enter turn_away with a new direction decision.
+                # Re-enter turn_away with a fresh side choice (clearance may
+                # have shifted now that we've moved).
                 print("[Reroute] New obstacle during drive — re-rotating.")
                 self._reroute_phase = "turn_away"
                 self._reroute_phase_start = now
-                obs_cx = self._front_obstacle_cx()
-                if obs_cx is not None:
-                    self._reroute_omega_sign = -1 if obs_cx > fw / 2 else +1
+                self._reroute_omega_sign = self._choose_reroute_side()
                 return
             else:
                 self._reroute_clear_count += 1
