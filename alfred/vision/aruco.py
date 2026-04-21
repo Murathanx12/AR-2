@@ -147,6 +147,11 @@ class ArucoDetector:
     def compute_approach_vector(self, pose):
         """Compute a motion vector (vx, vy, omega) to approach using pose estimation.
 
+        Sign convention (matches line_follower / ArucoApproach / person-follow):
+            marker on the right (tx > 0) → positive vy (strafe right) and
+            positive omega (spin right, CW). Line-follower proves this with
+            turn_strengths = (-7,-4.5,0,+4.5,+7) for (W,NW,N,NE,E).
+
         Args:
             pose: Dict from estimate_pose() with "tvec" and "rvec".
 
@@ -163,7 +168,7 @@ class ArucoDetector:
         KP_ROTATION = 100.0
 
         vx = max(0, min(150, KP_FORWARD * tz))
-        vy = max(-100, min(100, -KP_LATERAL * tx))
-        omega = max(-100, min(100, -KP_ROTATION * math.atan2(tx, tz)))
+        vy = max(-100, min(100, KP_LATERAL * tx))
+        omega = max(-100, min(100, KP_ROTATION * math.atan2(tx, tz)))
 
         return (vx, vy, omega)

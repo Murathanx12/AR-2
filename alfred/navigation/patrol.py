@@ -65,12 +65,17 @@ class PatrolController:
         vx = self.wander_speed
         omega = int(self._current_omega)
 
-        # Obstacle reaction: bias away from obstacles
+        # Obstacle reaction: bias away from obstacles.
+        # Each obstacle dict can carry "frame_width" — fall back to a 1280 px
+        # default (matches VisionConfig.resolution). The old hardcoded 400
+        # assumed an 800 px frame, which shifted the split off-centre at 720p.
         if obstacles:
             for obs in obstacles:
-                cx, _ = obs.get("center", (400, 300))
-                # If obstacle on left half, turn right and vice versa
-                if cx < 400:  # approximate center for 800px wide frame
+                cx, _ = obs.get("center", (640, 360))
+                fw = obs.get("frame_width", 1280)
+                center_x = fw / 2
+                # omega > 0 = spin right (CW). Obstacle on my left → turn right.
+                if cx < center_x:
                     omega += 20
                 else:
                     omega -= 20

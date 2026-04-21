@@ -22,6 +22,13 @@ UART: 115200 baud on /dev/ttyAMA2. Pi sends mv_vector:vx,vy,omega\n, ESP sends I
 Mecanum IK: FL=vx+vy+omega, FR=vx-vy-omega, RL=vx-vy+omega, RR=vx+vy-omega. PWM 50-200 from 0-100%.
 Wiring: See docs/WIRING.md for complete pin map.
 
+**Direction convention (critical — get this right or everything drives backwards):**
+- `vx > 0` = forward, `vx < 0` = reverse
+- `vy > 0` = strafe right, `vy < 0` = strafe left
+- `omega > 0` = spin **right** (CW viewed from above), `omega < 0` = spin left
+- Convention is proved by line-follower's `turn_strengths = (-7, -4.5, 0, +4.5, +7)` for sensors `(W, NW, N, NE, E)`: line under E (rightmost sensor) → positive turn_var → positive omega → spin right to chase. Every other controller (ArucoApproach, person-follow, obstacle_avoider, patrol) must use the same sign.
+- To **centre a target visible at error_x** (where error_x > 0 = target in right half of frame): `omega = +K * error_x`. A minus sign here spins the robot AWAY from its target — this bug has bitten the codebase twice, once in person-follow and once in the ArUco back-up branch (both fixed 2026-04-20, commits `fcf10dc` / `16d2652`).
+
 Network / VPN
 
 - Windscribe VPN via OpenVPN (Singapore) — required for OpenAI API, Claude API, and Google STT in HK/China
@@ -110,11 +117,22 @@ Voice System Design
 Camera System
 
 - USB camera auto-detected (scans indices 0-9, uses V4L2 backend to avoid GStreamer issues)
-- Native resolution: 1920x1080 (set in config.py VisionConfig)
+- **Capture: 1280×720 @ 24 fps, MJPG fourcc** (set in `config.py :: VisionConfig`). YUYV uncompressed at 1080p saturated USB 2.0 and locked the FSM to ~10 fps; MJPG at 720p comfortably sustains 24 fps+ with ArUco detect running ~20 ms/frame. `CameraManager.actual_fps` is logged every ~5 s.
 - Camera MUST be plugged directly into Pi USB port (not through hub)
 - ArUco: DICT_4X4_50 markers 0-49, supports both old and new OpenCV API
+- **ArUco approach is distance-based, not pixel-size-based.** `ArucoApproach._distance_m(pixel_size, frame_width)` uses the pinhole model with `PHYSICAL_MARKER_M = 0.05` (5 cm printed tag) and `FOCAL_RATIO = 0.8` (≈ focal_length_px / frame_width for typical USB webcams). Stop target: `STOP_DIST_M = 0.20` (20 cm), hold band 0.15–0.30 m, re-engage beyond 0.35 m. Tune `PHYSICAL_MARKER_M` if your printed marker isn't 5 cm; tune `FOCAL_RATIO` after measuring a known distance if the stop point is consistently off.
+- Max reliable ArUco detection range at 720p ≈ 2 m for a 5 cm marker; 3 m at 1080p. Detection *accuracy* (when detected) is the same at both resolutions — it's binary.
 - OpenAI Vision scene analyzer: periodic AI-powered scene understanding during patrol/search states
 - Person detection: MediaPipe face + hand + 6 gestures (when installed)
+
+Person-follow behavior (FSM state `PERSON_APPROACH`, intent `come_here` / "follow me")
+
+- Uses MediaPipe face detection. Largest face = closest person.
+- Stop condition is resolution-independent: face width ≥ 25 % of frame width (≈ half a metre for an adult head).
+- EMA smoothing (α=0.4) on face centre and width so detection jitter doesn't whip the heading.
+- Same omega convention as everything else: face on right → +omega → spin right.
+- Lost on a single frame → rotate-and-scan at omega=8 up to 4 s, then give up and return to IDLE with "I seem to have lost you." Does NOT fall through to PATROL.
+- Once reached, robot stays with the person and keeps heading locked. If they walk away, size_frac drops and the approach resumes. Greeting plays only once per command.
 
 GUI System
 
