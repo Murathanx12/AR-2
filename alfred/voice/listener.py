@@ -253,7 +253,7 @@ class VoiceListener:
     def _transcribe_google(self, audio_data):
         """Transcribe audio bytes using Google Speech Recognition. Returns text string."""
         recognizer = sr.Recognizer()
-        audio = sr.AudioData(audio_data, self.SAMPLE_RATE, 2)
+        audio = sr.AudioData(audio_data, self._actual_rate, 2)
         try:
             text = recognizer.recognize_google(audio, language="en-US")
             return text.lower().strip()

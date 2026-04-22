@@ -7,7 +7,7 @@ from alfred.config import CONFIG
 from alfred.fsm.states import State, STATE_NAMES
 from alfred.comms.uart import UARTBridge
 from alfred.comms.protocol import (
-    cmd_stop, cmd_vector, cmd_led, cmd_led_pattern, cmd_buzzer,
+    cmd_stop, cmd_vector, cmd_buzzer,
     cmd_turn_left, cmd_turn_right, cmd_spin_left,
 )
 from alfred.navigation.line_follower import LineFollower, FollowState
@@ -284,6 +284,8 @@ class AlfredFSM:
         self._photo_taken = False
         self._aruco_target_id = None  # None = follow any marker, int = specific ID
         self._aruco_announced_id = None  # last marker ID we've already spoken about
+        self._aruco_arrived_announced = False
+        self._aruco_hold_start = None
         self._last_aruco_pose = None
         self._last_frame = None
         self._last_faces = []
@@ -297,6 +299,9 @@ class AlfredFSM:
         self._person_smooth_bw = None
         self._person_lost_since = None
         self._person_greeted = False
+
+        # Blocked state timing
+        self._blocked_entry_time = None
 
         # Marker memory — keeps last-known bearing so search after a reroute
         # or brief occlusion spins the *right* way, not a blind sweep.
@@ -370,7 +375,6 @@ class AlfredFSM:
         """Shut down all subsystems."""
         self._running = False
         self.uart.send(cmd_stop())
-        self.uart.send(cmd_led(0, 0, 0))
         self.uart.close()
 
         if self.camera:
@@ -401,6 +405,7 @@ class AlfredFSM:
 
         self._previous_state = self.state
         self.state = new_state
+        self._blocked_entry_time = None
 
         # R5: Update LED color for new state
         self._update_led(new_state)
@@ -421,22 +426,8 @@ class AlfredFSM:
             self.arms.express_state(new_name)
 
     def _update_led(self, state):
-        """Send LED color command for given state via UART."""
-        color = STATE_LED_COLORS.get(state, (0, 0, 0))
-        self.uart.send(cmd_led(*color))
-
-        # Special patterns for certain states
-        if state == State.DANCING:
-            self.uart.send(cmd_led_pattern(2))  # rainbow
-        elif state == State.BLOCKED:
-            self.uart.send(cmd_led_pattern(3))  # blink red
-        elif state == State.ARUCO_SEARCH:
-            self.uart.send(cmd_led_pattern(4))  # breathe yellow
-        elif state == State.SLEEPING:
-            self.uart.send(cmd_led_pattern(4))  # breathe dim
-            self.uart.send(cmd_led(0, 0, 30))
-        else:
-            self.uart.send(cmd_led_pattern(0))  # solid
+        """Update LED state color for GUI display. NeoPixels are not installed."""
+        pass
 
     def _check_ultrasonic_obstacle(self) -> bool:
         """Check any ultrasonic sensor for obstacles (R4).
@@ -799,6 +790,8 @@ class AlfredFSM:
                     self._aruco_target_id = None
                     print(f"[ArUco] Following any visible marker")
                 self._aruco_announced_id = None  # fresh command, re-announce on acquire
+                self._aruco_arrived_announced = False
+                self._aruco_hold_start = None
                 self._aruco_lost_frames = 0
                 # Clear stale bearing memory from a previous target.
                 self._aruco_last_cx = None
@@ -968,7 +961,17 @@ class AlfredFSM:
         # of the tag). Same ultrasonic close + no target visible = obstacle.
         if self._check_ultrasonic_obstacle():
             if target_marker is not None:
-                self._on_aruco_arrived()
+                # Ultrasonic confirms we're close — force hold mode
+                if self.aruco_approach and not self.aruco_approach.is_holding():
+                    self.aruco_approach._holding = True
+                if not self._aruco_arrived_announced:
+                    self._aruco_arrived_announced = True
+                    self._aruco_hold_start = time.monotonic()
+                    self.uart.send(cmd_stop())
+                    self.uart.send(cmd_buzzer(1200, 300))
+                    print(f">>> Holding at ArUco marker {self._aruco_target_id}")
+                    if self.speaker:
+                        self.speaker.say("I have arrived at the marker. Your delivery is ready.")
                 return
             self.transition(State.BLOCKED)
             return
@@ -1015,43 +1018,48 @@ class AlfredFSM:
         h, w = self._last_frame.shape[:2]
         result = self.aruco_approach.compute_visual_approach(target_marker, w, h)
 
-        if result is None:
-            self._on_aruco_arrived()
-            return
-
         vx, vy, omega = result
+
+        # Announce arrival once when hold-mode first engages
+        if self.aruco_approach.is_holding() and not self._aruco_arrived_announced:
+            self._aruco_arrived_announced = True
+            self._aruco_hold_start = time.monotonic()
+            self.uart.send(cmd_buzzer(1200, 300))
+            print(f">>> Holding at ArUco marker {self._aruco_target_id}")
+            if self.speaker:
+                self.speaker.say("I have arrived at the marker. Your delivery is ready.")
 
         self.uart.send(cmd_vector(int(vx), int(vy), int(omega)))
         self.line_follower.debug_vx = int(vx)
         self.line_follower.debug_vy = int(vy)
         self.line_follower.debug_omega = int(omega)
 
-    def _on_aruco_arrived(self):
-        """Handle arrival at ArUco marker."""
-        self.uart.send(cmd_stop())
-        self.uart.send(cmd_buzzer(1200, 300))  # R5: arrival beep
-        print(f">>> Arrived at ArUco marker {self._aruco_target_id}")
-        if self.speaker:
-            self.speaker.say("I have arrived at the marker. Your delivery is ready.")
-        self.transition(State.IDLE)
-
     def _tick_blocked(self):
         """Stop and wait for obstacle to clear (R4).
 
-        Uses directional ultrasonic data to announce which side is blocked.
+        Checks both ultrasonic AND camera before resuming. Minimum 1s dwell
+        so we don't flicker BLOCKED<->APPROACH on a single noisy frame.
         """
         self.uart.send(cmd_stop())
         self.line_follower.debug_vx = 0
         self.line_follower.debug_vy = 0
         self.line_follower.debug_omega = 0
 
-        # Check if path cleared — ultrasonic is the primary sensor
-        ultrasonic_clear = not self._check_ultrasonic_obstacle()
+        now = time.monotonic()
+        if self._blocked_entry_time is None:
+            self._blocked_entry_time = now
 
-        if ultrasonic_clear:
+        # Minimum 1s in BLOCKED to avoid flicker
+        if now - self._blocked_entry_time < 1.0:
+            return
+
+        ultrasonic_clear = not self._check_ultrasonic_obstacle()
+        camera_clear = not self._check_camera_obstacle()
+
+        if ultrasonic_clear and camera_clear:
+            self._blocked_entry_time = None
             if self.speaker:
                 self.speaker.say("Path clear. Resuming.")
-            # Resume the previous state
             if self._previous_state in (State.FOLLOWING, State.ENDPOINT, State.PARKING,
                                          State.LOST_REVERSE, State.LOST_PIVOT):
                 self.line_follower.reset()
@@ -1061,9 +1069,6 @@ class AlfredFSM:
             elif self._previous_state == State.ARUCO_SEARCH:
                 self.transition(State.ARUCO_SEARCH)
             elif self._previous_state == State.REROUTING:
-                # Ultrasonic tripped mid-reroute — camera path might still be
-                # blocked, so re-enter REROUTING to keep trying. _reset_reroute
-                # on re-entry will pick a fresh strafe direction.
                 self.transition(State.REROUTING)
             else:
                 self.transition(State.IDLE)

@@ -459,12 +459,10 @@ class WebController:
 
             try:
                 import tempfile, os
-                # Save uploaded audio to temp file
                 with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as tmp:
                     audio_file.save(tmp.name)
                     tmp_path = tmp.name
 
-                # Try OpenAI Whisper API first (handles webm natively)
                 openai_key = os.environ.get("OPENAI_API_KEY")
                 if openai_key:
                     try:
@@ -481,7 +479,6 @@ class WebController:
                     except Exception as e:
                         log_event(f"Phone mic OpenAI error: {e}")
 
-                # Fallback: convert webm to wav and use local STT
                 if not text:
                     try:
                         import subprocess
@@ -505,20 +502,29 @@ class WebController:
                 if text:
                     log_event(f"PHONE MIC: '{text}'")
                     if self.fsm:
-                        self.fsm._on_voice_command(text)
+                        # Wake the listener first if not awake
                         if self.fsm.voice_listener and not self.fsm.voice_listener.is_awake:
                             from alfred.voice.listener import WAKE_VARIANTS
+                            woke = False
                             for wake in WAKE_VARIANTS:
                                 if wake in text.lower():
-                                    self.fsm.voice_listener._do_wake(
-                                        text.lower().split(wake, 1)[-1].strip()
-                                    )
+                                    after = text.lower().split(wake, 1)[-1].strip()
+                                    self.fsm.voice_listener._do_wake("")
+                                    text = after if after else text
+                                    woke = True
                                     break
+                            if not woke:
+                                # Auto-wake from phone mic — demo convenience
+                                self.fsm.voice_listener._do_wake("")
 
-                    if self.fsm and self.fsm.intent_classifier:
-                        intent_name, conf = self.fsm.intent_classifier.classify(text)
-                        intent = intent_name
-                        confidence = f"{conf:.0%}"
+                        # Dispatch through FSM (classifies intent internally)
+                        self.fsm._on_voice_command(text)
+
+                        # Get intent for the JSON response without re-classifying
+                        if self.fsm.intent_classifier:
+                            intent_name, conf = self.fsm.intent_classifier.classify(text)
+                            intent = intent_name
+                            confidence = f"{conf:.0%}"
 
             except Exception as e:
                 log_event(f"Phone mic error: {e}")
@@ -601,10 +607,9 @@ class WebController:
                                 cv2.putText(display,f"Face {conf:.0%}",(fx,fy-8),
                                     cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,255,0),1)
 
-                        # Draw ArUco markers
-                        if self.fsm.aruco_detector:
-                            ms = self.fsm.aruco_detector.detect(display)
-                            self.fsm.aruco_detector.draw_markers(display, ms)
+                        # Draw ArUco markers (use cached results — no re-detect)
+                        if self.fsm.aruco_detector and self.fsm._last_markers:
+                            self.fsm.aruco_detector.draw_markers(display, self.fsm._last_markers)
 
                         # Draw obstacles
                         if self.fsm._last_obstacles:

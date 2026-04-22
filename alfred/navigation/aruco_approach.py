@@ -77,8 +77,8 @@ class ArucoApproach:
         Logic:
         1. If marker not centered: rotate to center it (no forward motion)
         2. If centered: drive forward, slow down as we get closer
-        3. If within STOP_DIST_M: stop and hold distance
-        Returns (vx, vy, omega). vx > 0 = forward, vx < 0 = reverse.
+        3. If within STOP_DIST_M: enter hold mode — maintain distance
+        Always returns (vx, vy, omega). vx > 0 = forward, vx < 0 = reverse.
         """
         raw_cx, _ = marker["center"]
         raw_size = marker["size"]
