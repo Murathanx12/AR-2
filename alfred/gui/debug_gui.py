@@ -296,10 +296,10 @@ class DebugGUI:
         now = time.monotonic()
 
         bits = [0, 0, 0, 0, 0]
-        dist_cm = -1.0
+        dists = {"left": -1.0, "center": -1.0, "right": -1.0}
         if uart and uart.is_open:
             bits = uart.get_ir_bits()
-            dist_cm = uart.get_distance()
+            dists = uart.get_distances()
 
         debug_vx = lf.debug_vx if lf else 0
         debug_vy = lf.debug_vy if lf else 0
@@ -435,18 +435,19 @@ class DebugGUI:
         else:
             self._draw_simple_eyes(right_x, right_y, RIGHT_W, eye_h, state)
 
-        # -- IR Sensors panel --
+        # -- Sensors panel (IR + 3x Ultrasonic) --
         ir_y = right_y + eye_h + PAD
-        ir_h = int(MIDDLE_H * 0.25)
+        ir_h = int(MIDDLE_H * 0.38)
         pygame.draw.rect(self._screen, PANEL, (right_x, ir_y, RIGHT_W, ir_h), border_radius=10)
         pygame.draw.rect(self._screen, BORDER, (right_x, ir_y, RIGHT_W, ir_h), 1, border_radius=10)
         self._screen.blit(self._fonts['xs'].render("IR SENSORS", True, DIM), (right_x + 10, ir_y + 4))
 
         sensor_names = ['W', 'NW', 'N', 'NE', 'E']
         spacing = RIGHT_W // 6
+        ir_btn_y = ir_y + 22
         for i in range(5):
             sx = right_x + spacing * (i + 1) - 20
-            sy = ir_y + ir_h // 2 - 4
+            sy = ir_btn_y
             on = bits[i]
             color = (0, 220, 80) if on else (42, 46, 56)
             bc = (0, 255, 80) if on else (55, 60, 72)
@@ -455,14 +456,53 @@ class DebugGUI:
             lbl = self._fonts['xs'].render(sensor_names[i], True, (255, 255, 255) if on else (80, 80, 90))
             self._screen.blit(lbl, (sx + 20 - lbl.get_width() // 2, sy + 4))
 
-        # Ultrasonic
-        if dist_cm > 0:
-            dc = (220, 50, 50) if dist_cm < 20 else (0, 200, 100)
-            self._screen.blit(self._fonts['sm'].render(f"Ultrasonic: {dist_cm:.0f}cm", True, dc),
-                            (right_x + 10, ir_y + ir_h - 22))
-        else:
-            self._screen.blit(self._fonts['sm'].render("Ultrasonic: not connected", True, (60, 60, 70)),
-                            (right_x + 10, ir_y + ir_h - 22))
+        # -- Ultrasonic 3x display --
+        us_label_y = ir_btn_y + 32
+        self._screen.blit(self._fonts['xs'].render("ULTRASONIC", True, DIM), (right_x + 10, us_label_y))
+
+        us_names = ['L', 'C', 'R']
+        us_keys = ['left', 'center', 'right']
+        bar_max_w = RIGHT_W - 80
+        bar_h = 16
+        bar_x = right_x + 30
+        bar_start_y = us_label_y + 18
+
+        for idx, (name, key) in enumerate(zip(us_names, us_keys)):
+            by = bar_start_y + idx * (bar_h + 6)
+            d = dists[key]
+
+            # Label
+            self._screen.blit(self._fonts['xs'].render(name, True, (150, 155, 170)),
+                              (right_x + 10, by + 1))
+
+            # Background bar
+            pygame.draw.rect(self._screen, (34, 38, 48), (bar_x, by, bar_max_w, bar_h), border_radius=4)
+
+            if d > 0:
+                # Fill bar — scale 0-200cm to full width, clamp at 200
+                fill_frac = min(d / 200.0, 1.0)
+                fill_w = max(2, int(bar_max_w * fill_frac))
+                if d < 20:
+                    bar_color = (220, 50, 50)
+                    border_color = (255, 60, 60)
+                elif d < 50:
+                    bar_color = (220, 160, 30)
+                    border_color = (255, 190, 40)
+                else:
+                    bar_color = (0, 180, 90)
+                    border_color = (0, 220, 100)
+                pygame.draw.rect(self._screen, bar_color, (bar_x, by, fill_w, bar_h), border_radius=4)
+                pygame.draw.rect(self._screen, border_color, (bar_x, by, fill_w, bar_h), 1, border_radius=4)
+
+                # Distance text
+                dtxt = f"{d:.0f}cm"
+                if d < 20:
+                    dtxt += " !"
+                dl = self._fonts['xs'].render(dtxt, True, (255, 255, 255))
+                self._screen.blit(dl, (bar_x + bar_max_w + 4, by + 1))
+            else:
+                dl = self._fonts['xs'].render("---", True, (60, 60, 70))
+                self._screen.blit(dl, (bar_x + bar_max_w + 4, by + 1))
 
         # -- Movement vector panel --
         vec_y = ir_y + ir_h + PAD
