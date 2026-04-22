@@ -65,13 +65,20 @@ class AlfredFSM:
     """
 
     def __init__(self, config=None, headless=False, no_voice=False, no_camera=False,
-                 use_vision_ai=False, vision_ai_interval=5.0):
+                 use_vision_ai=False, vision_ai_interval=5.0,
+                 no_ultrasonic=False, no_yolo_obstacle=False):
         self.config = config or CONFIG
         self.headless = headless
         self.no_voice = no_voice
         self.no_camera = no_camera
         self.use_vision_ai = use_vision_ai
         self.vision_ai_interval = vision_ai_interval
+        # Runtime kill-switches for flaky hardware / false positives. Ultrasonic
+        # is wired to the burnt logic board → noisy phantom readings trigger
+        # BLOCKED. YOLO during ARUCO_APPROACH trips on the marker itself or
+        # nearby furniture → REROUTE fires immediately.
+        self.no_ultrasonic = no_ultrasonic
+        self.no_yolo_obstacle = no_yolo_obstacle
 
         # Core subsystems (always created)
         self.uart = UARTBridge(
@@ -244,6 +251,15 @@ class AlfredFSM:
         self.state = State.IDLE
         self._running = False
         self._previous_state = None  # for resuming after obstacle
+        # Announcement dedup: state flips can cascade into back-to-back TTS,
+        # which keeps the mic muted and swallows the user's next "stop".
+        self._last_announced_state = None
+        self._last_announced_time = 0.0
+        # Hysteresis for ARUCO_APPROACH: require several consecutive lost-tag
+        # frames before falling back to SEARCH. One dropped detection at 22fps
+        # is not a lost marker.
+        self._aruco_lost_frames = 0
+        self.ARUCO_LOST_FRAMES_THRESHOLD = 5
 
         # Per-state context
         self._dance_start = None
@@ -370,10 +386,16 @@ class AlfredFSM:
         # R5: Update LED color for new state
         self._update_led(new_state)
 
-        # R5: TTS announcement for state transition
+        # R5: TTS announcement for state transition — but dedup so that a
+        # rapid APPR↔SRCH flicker doesn't spam TTS and mute the mic.
         announcement = STATE_ANNOUNCEMENTS.get(new_state)
         if announcement and self.speaker:
-            self.speaker.say(announcement)
+            now = time.monotonic()
+            if (new_state != self._last_announced_state or
+                    now - self._last_announced_time > 5.0):
+                self.speaker.say(announcement)
+                self._last_announced_state = new_state
+                self._last_announced_time = now
 
         # EC5: Cosmetic arm animations
         if self.arms:
@@ -401,8 +423,14 @@ class AlfredFSM:
         """Check any ultrasonic sensor for obstacles (R4).
 
         Returns True only if any sensor is connected AND obstacle within threshold.
-        Returns False if no sensor data (distance == -1).
+        Returns False if no sensor data (distance == -1) or sensors disabled.
+
+        When ultrasonic is physically disconnected, the ESP32 still reports values
+        — dangling echo wires pick up noise and produce phantom short-range
+        readings that oscillate FOLLOW ↔ BLOCKED. `--no-ultrasonic` disables it.
         """
+        if self.no_ultrasonic:
+            return False
         return self.uart.is_obstacle_detected(OBSTACLE_THRESHOLD_CM)
 
     def _get_obstacle_direction(self) -> str:
@@ -415,8 +443,11 @@ class AlfredFSM:
     def _check_camera_obstacle(self) -> bool:
         """Check camera-based obstacle detection using YOLO or contour fallback (R4).
 
-        Returns True if obstacle detected. Returns False if no detector.
+        Returns True if obstacle detected. Returns False if no detector or
+        disabled via `--no-yolo-obstacle`.
         """
+        if self.no_yolo_obstacle:
+            return False
         if self._last_frame is None:
             return False
         if self.yolo_detector:
@@ -618,7 +649,15 @@ class AlfredFSM:
             # Just wake up directly — don't ask confirmation
             return
 
-        intent, confidence = self.intent_classifier.classify(text)
+        # Fast path: literal stop keywords skip the GPT-4o-mini round trip
+        # entirely so "stop" acts within ~300 ms (VAD silence) instead of
+        # ~800 ms. The listener already forwards exactly "stop" for any of
+        # {stop, halt, freeze}, so this match is safe.
+        stripped = text.strip().lower().rstrip(".!,?")
+        if stripped in ("stop", "halt", "freeze"):
+            intent, confidence = "stop", 1.0
+        else:
+            intent, confidence = self.intent_classifier.classify(text)
         logger.info(f"VOICE '{text}' -> intent={intent} conf={confidence:.0%}")
         print(f"[Voice] '{text}' -> {intent} ({confidence:.0%})")
 
@@ -633,13 +672,17 @@ class AlfredFSM:
             self.line_follower.debug_vx = 0
             self.line_follower.debug_vy = 0
             self.line_follower.debug_omega = 0
+            self._aruco_target_id = None           # drop any marker chase
             self._aruco_announced_id = None
+            self._aruco_lost_frames = 0
             self._reset_reroute()
             if self.speaker:
                 self.speaker.stop()
                 self.speaker.say("stop")
             if self.gui:
                 self.gui.set_voice_output("Stopping.")
+            # Reset announcement dedup so "stop" announcement itself is heard.
+            self._last_announced_state = None
             self.transition(State.IDLE)
             return
 
@@ -728,6 +771,7 @@ class AlfredFSM:
                     self._aruco_target_id = None
                     print(f"[ArUco] Following any visible marker")
                 self._aruco_announced_id = None  # fresh command, re-announce on acquire
+                self._aruco_lost_frames = 0
                 # Clear stale bearing memory from a previous target.
                 self._aruco_last_cx = None
                 self._aruco_last_size = None
@@ -878,21 +922,6 @@ class AlfredFSM:
             self.transition(State.IDLE)
             return
 
-        # R4: Hard-stop on ultrasonic — that's a "close enough to collide" signal.
-        if self._check_ultrasonic_obstacle():
-            self.transition(State.BLOCKED)
-            return
-
-        # Camera-based obstacle avoidance: if something (person / box / chair /
-        # YOLO-labelled object) is sitting in the centre of the path, strafe
-        # around it instead of driving through. We remember the marker's last
-        # bearing first so the reroute exit knows which way to resume.
-        if self._check_camera_obstacle():
-            self._reroute_from = State.ARUCO_APPROACH
-            self._reset_reroute()  # next REROUTING tick will initialise fresh
-            self.transition(State.REROUTING)
-            return
-
         markers = self.aruco_detector.detect(self._last_frame)
 
         # Find target marker (or any marker if target_id is None)
@@ -906,15 +935,53 @@ class AlfredFSM:
             target_marker = max(markers, key=lambda m: m["size"])
             self._aruco_target_id = target_marker["id"]
 
+        # Ultrasonic as the authoritative distance sensor during final approach.
+        # Centre sensor < 20 cm + target visible = arrived (we're right in front
+        # of the tag). Same ultrasonic close + no target visible = obstacle.
+        if self._check_ultrasonic_obstacle():
+            if target_marker is not None:
+                self._on_aruco_arrived()
+                return
+            self.transition(State.BLOCKED)
+            return
+
+        # Camera-based obstacle avoidance: if something (person / box / chair /
+        # YOLO-labelled object) is sitting in the centre of the path, strafe
+        # around it instead of driving through. But: if the target tag is
+        # visible in the current frame we have line-of-sight to it — YOLO is
+        # probably flagging the tag's stand or nearby furniture, not an actual
+        # blocker. Trust the tag, skip the reroute.
+        if target_marker is None and self._check_camera_obstacle():
+            self._reroute_from = State.ARUCO_APPROACH
+            self._reset_reroute()  # next REROUTING tick will initialise fresh
+            self.transition(State.REROUTING)
+            return
+
         if target_marker is None:
+            # Hysteresis — a single lost detection isn't a lost marker.
+            # Drop-frames happen all the time at 20-25 fps from motion blur,
+            # partial-occlusion, or the tag grazing a frame edge. Only fall
+            # back to SEARCH after several consecutive losses, otherwise we
+            # thrash and spam TTS announcements (which mute the mic).
+            self._aruco_lost_frames += 1
+            if self._aruco_lost_frames < self.ARUCO_LOST_FRAMES_THRESHOLD:
+                # Coast straight at the last-known command for one more tick.
+                vx = self.line_follower.debug_vx
+                vy = self.line_follower.debug_vy
+                omega = self.line_follower.debug_omega
+                self.uart.send(cmd_vector(int(vx), int(vy), int(omega)))
+                return
             if markers:
                 # See markers but not our target
                 seen = [m["id"] for m in markers]
                 print(f"[ArUco] See {seen}, want {self._aruco_target_id}")
-            # Lost target — search again. _tick_aruco_search will spin back
-            # toward the last-known bearing.
+            # Genuinely lost — spin back to search.
+            self._aruco_lost_frames = 0
             self.transition(State.ARUCO_SEARCH)
             return
+
+        # Marker detected — reset lost counter.
+        self._aruco_lost_frames = 0
 
         # Remember where/how big the marker is so later search/reroute can
         # recover without a blind spin.
@@ -978,7 +1045,6 @@ class AlfredFSM:
                 self.transition(State.IDLE)
 
     def _tick_rerouting(self):
-<<<<<<< HEAD
         """Hybrid obstacle-avoidance manoeuvre — curves smoothly if the
         obstacle is still far, falls back to rotate-drive-rotate if close.
 

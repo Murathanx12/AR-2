@@ -124,8 +124,8 @@ class VoiceListener:
     SAMPLE_RATE = 16000
     CHUNK_SIZE = 1024         # ~64ms per chunk at 16kHz
     SILENCE_THRESHOLD = 500   # RMS energy below this = silence (lowered for weak USB mics)
-    SILENCE_DURATION = 0.5    # seconds of silence to end utterance
-    MIN_SPEECH_DURATION = 0.3 # minimum speech to process (ignore clicks/noise)
+    SILENCE_DURATION = 0.25   # seconds of silence to end utterance (shorter = snappier stop)
+    MIN_SPEECH_DURATION = 0.2 # minimum speech to process (ignore clicks/noise)
     MAX_SPEECH_DURATION = 5   # max 5 seconds per utterance (commands are short)
     NOISE_FLOOR_FRAMES = 50   # frames to measure ambient noise level at startup
 
@@ -381,16 +381,68 @@ class VoiceListener:
             print("[Voice] Set OPENAI_API_KEY or install faster-whisper")
             return
 
-        # Open mic
+        # Open mic. Explicitly pick a working USB mic rather than the ALSA
+        # default — this Pi has both a broken "USB2.0 Device" combo device
+        # (card 1, stops capturing after first buffer) and a healthy "USB
+        # PnP Sound Device" (card 3). Prefer PnP / microphone / headset in
+        # the name; avoid names containing the broken combo's signature.
         p = pyaudio.PyAudio()
-        try:
-            stream = p.open(
-                format=pyaudio.paInt16, channels=1,
-                rate=self.SAMPLE_RATE, input=True,
-                frames_per_buffer=self.CHUNK_SIZE,
-            )
-        except Exception as e:
-            print(f"[Voice] Failed to open mic: {e}")
+        chosen_idx = None
+        chosen_name = None
+        candidates = []
+        for i in range(p.get_device_count()):
+            try:
+                info = p.get_device_info_by_index(i)
+            except Exception:
+                continue
+            if info.get("maxInputChannels", 0) < 1:
+                continue
+            name = str(info.get("name", ""))
+            candidates.append((i, name))
+        def _score(name: str) -> int:
+            n = name.lower()
+            if "usb2.0 device" in n:       # known-broken combo dongle on this Pi
+                return -10
+            if "pnp" in n:                  return 100
+            if "microphone" in n or "mic" in n: return 50
+            if "headset" in n:              return 40
+            if "usb" in n:                  return 20
+            if "default" in n:              return 5
+            if "pipewire" in n or "pulse" in n: return 3
+            return 0
+        if candidates:
+            chosen_idx, chosen_name = max(candidates, key=lambda c: _score(c[1]))
+        # Build an ordered list of attempts. The chosen hw device is best
+        # (direct path, lowest latency) but may reject 16 kHz — in that case
+        # fall through to pipewire/default which resample automatically.
+        attempts = []
+        if chosen_idx is not None:
+            attempts.append(("chosen", chosen_idx, chosen_name))
+        for i, name in candidates:
+            if "pipewire" in name.lower():
+                attempts.append(("pipewire", i, name))
+        for i, name in candidates:
+            if name.lower() == "default":
+                attempts.append(("default", i, name))
+
+        stream = None
+        last_err = None
+        for label, idx, name in attempts:
+            try:
+                stream = p.open(
+                    format=pyaudio.paInt16, channels=1,
+                    rate=self.SAMPLE_RATE, input=True,
+                    input_device_index=idx,
+                    frames_per_buffer=self.CHUNK_SIZE,
+                )
+                print(f"[Voice] Using mic ({label}): idx={idx} {name!r}")
+                break
+            except Exception as e:
+                last_err = e
+                print(f"[Voice] mic idx={idx} ({label}) rejected @ {self.SAMPLE_RATE} Hz: {e}")
+                continue
+        if stream is None:
+            print(f"[Voice] Failed to open any mic: {last_err}")
             p.terminate()
             return
 

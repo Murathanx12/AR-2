@@ -86,7 +86,7 @@ class VoiceConfig:
 class VisionConfig:
     """Vision subsystem."""
     camera_index: int = 1
-    resolution: Tuple[int, int] = (640, 480)
+    resolution: Tuple[int, int] = (1920, 1080)
     fps: int = 30
     aruco_dict: str = "DICT_4X4_50"
     aruco_stop_size: int = 150  # legacy, unused — see ArucoApproach.STOP_DIST_M

@@ -298,6 +298,10 @@ def main():
                         help="Enable OpenAI Vision scene analyzer (off by default, uses API budget)")
     parser.add_argument("--vision-ai-interval", type=float, default=5.0,
                         help="Seconds between OpenAI Vision analyses (default: 5.0, use 1.0 for testing)")
+    parser.add_argument("--no-ultrasonic", action="store_true",
+                        help="Ignore ultrasonic sensor readings (use when HC-SR04 are unplugged)")
+    parser.add_argument("--no-yolo-obstacle", action="store_true",
+                        help="Disable YOLO/contour obstacle detection (skip REROUTING entirely)")
     parser.add_argument("--speed", type=int, default=CONFIG.speed.default_speed,
                         help=f"Override default speed (default: {CONFIG.speed.default_speed})")
     args = parser.parse_args()
@@ -320,6 +324,8 @@ def main():
         no_camera=args.no_camera,
         use_vision_ai=args.vision_ai,
         vision_ai_interval=args.vision_ai_interval,
+        no_ultrasonic=args.no_ultrasonic,
+        no_yolo_obstacle=args.no_yolo_obstacle,
     )
 
     if args.speed != CONFIG.speed.default_speed:

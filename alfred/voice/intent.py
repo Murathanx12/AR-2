@@ -133,19 +133,32 @@ class IntentClassifier:
             )
 
     def classify(self, text):
-        """Classify text into an intent. Tries GPT-4o-mini first, then keywords.
+        """Classify text into an intent.
+
+        Keyword fast path first — saves ~400 ms round-trip to GPT-4o-mini on
+        common commands ('stop', 'follow the track', 'go to marker 8'). Falls
+        through to the smart classifier only when keywords don't resolve
+        confidently, or when the command looks like natural-language chat.
 
         Returns:
             Tuple (intent_name, confidence). Also sets self.last_marker_id.
         """
         self.last_marker_id = None
 
+        kw = self._classify_keywords(text)
+        # Accept keyword match if it's a concrete action.  For go_to_aruco we
+        # let the keyword path through even without a marker ID (means "any
+        # visible marker") — same semantics as the smart classifier.
+        if kw[0] not in ("unknown", "chat"):
+            return kw
+
+        # Natural language / ambiguous — ask GPT.
         if _openai_client:
             result = self._classify_smart(text)
             if result:
                 return result
 
-        return self._classify_keywords(text)
+        return kw  # "unknown"
 
     def _classify_smart(self, text):
         """Use GPT-4o-mini for natural language intent classification."""
