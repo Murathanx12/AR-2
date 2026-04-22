@@ -70,7 +70,7 @@ On-robot peripherals:
 - PCA9685 16-channel servo controller — head tilt (ch0) + left arm (ch1-2) + right arm (ch3-4)
 - 4x WS2812B NeoPixel LEDs (GPIO48)
 - Piezo buzzer (GPIO46)
-- 3x HC-SR04 ultrasonic: Left (GPIO19 trig, GPIO20 echo), Center (GPIO1 trig, GPIO18 echo), Right (GPIO4 trig, GPIO48 echo)
+- 3x HC-SR04 ultrasonic: Left (GPIO19 trig, GPIO20 echo), Center (GPIO18 trig, GPIO1 echo), Right (GPIO40 trig, GPIO39 echo)
 - 5x TCRT5000 IR line sensors (GPIO 5,6,7,15,45)
 
 Servo Arm Layout (PCA9685):

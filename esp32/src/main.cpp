@@ -36,10 +36,10 @@ const int irPins[5] = {IR_W_PIN, IR_NW_PIN, IR_N_PIN, IR_NE_PIN, IR_E_PIN};
 // ---------------- Ultrasonic sensors (3x HC-SR04) — R4 obstacle detection --
 #define TRIG_L_PIN 19   // GPIO19 — left trigger
 #define ECHO_L_PIN 20   // GPIO20 — left echo (voltage divider!)
-#define TRIG_C_PIN 1    // GPIO1  — center trigger
-#define ECHO_C_PIN 18   // GPIO18 — center echo (voltage divider!)
-#define TRIG_R_PIN 4    // GPIO4  — right trigger
-#define ECHO_R_PIN 48   // GPIO48 — right echo (voltage divider!) ⚠ shared with NeoPixel!
+#define TRIG_C_PIN 18   // GPIO18 — center trigger
+#define ECHO_C_PIN 1    // GPIO1  — center echo (voltage divider!)
+#define TRIG_R_PIN 40   // GPIO40 — right trigger
+#define ECHO_R_PIN 39   // GPIO39 — right echo (voltage divider!) ⚠ shared with NeoPixel!
 
 // ---------------- Buzzer — R5 audio indicator ------------------------------
 #define BUZZER_PIN 46  // GPIO46
