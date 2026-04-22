@@ -192,13 +192,36 @@ class IntentClassifier:
             logger.warning(f"Smart intent failed: {e}")
             return None
 
+    # Short agreement/cancel keywords that would otherwise match inside any
+    # sentence ("ok what's going on?" classified as confirm). For these we
+    # require the utterance to be SHORT — one of these words effectively on
+    # its own, maybe with mild filler. Otherwise the sentence is something
+    # more substantive and should go to the smart classifier.
+    _SHORT_ONLY = {
+        "yes": "confirm", "yeah": "confirm", "yep": "confirm",
+        "okay": "confirm", "ok": "confirm", "sure": "confirm",
+        "no": "cancel", "nope": "cancel", "cancel": "cancel",
+    }
+
     def _classify_keywords(self, text):
         """Fallback keyword-based classification. Longest match wins."""
         lower = text.lower().strip()
         if not lower:
             return ("unknown", 0.0)
 
+        # Short agreement/cancel — only fire when the utterance is short
+        # enough to be an actual yes/no (≤3 words, ≤15 chars). "ok what's
+        # going on" is not a confirmation.
+        tokens = [t for t in lower.replace("?", " ").replace(".", " ").replace(",", " ").split() if t]
+        if len(tokens) <= 3 and len(lower) <= 18:
+            for kw, intent in self._SHORT_ONLY.items():
+                if kw in tokens:
+                    self.last_marker_id = None
+                    return (intent, 0.95)
+
         for keyword, intent in IntentClassifier._SORTED:
+            if keyword in self._SHORT_ONLY:
+                continue  # handled above with length gating
             if keyword in lower:
                 self.last_marker_id = self.extract_marker_id(text)
                 return (intent, 1.0)

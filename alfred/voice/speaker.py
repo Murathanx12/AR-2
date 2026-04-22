@@ -113,6 +113,12 @@ class Speaker:
         # stale generation skip execution instead of speaking late.
         self._stop_gen = 0
         self._gen_lock = threading.Lock()
+        # Ring buffer of recent utterances (normalised + expiry timestamp).
+        # The voice listener uses `was_recently_said()` to discard mic input
+        # that matches something we just played out loud — self-speech
+        # suppression without needing to mute the mic during TTS.
+        self._recent_utterances = []  # list of (normalised_text, expiry_mono)
+        self._recent_lock = threading.Lock()
 
     @property
     def language(self):
@@ -123,8 +129,65 @@ class Speaker:
         actual_text = self.PHRASES.get(text, text)
         with self._gen_lock:
             gen = self._stop_gen
+        # Record what we're about to say so the listener can ignore it when
+        # the mic picks it up. Expire after ~6 s (covers typical TTS + a
+        # little transcription latency headroom).
+        import time as _t
+        norm = self._normalize_for_match(actual_text)
+        if norm:
+            with self._recent_lock:
+                self._recent_utterances.append((norm, _t.monotonic() + 6.0))
+                # Cap to 6 most recent to keep comparison cheap.
+                if len(self._recent_utterances) > 6:
+                    self._recent_utterances.pop(0)
         thread = threading.Thread(target=self._speak_sync, args=(actual_text, gen), daemon=True)
         thread.start()
+
+    @staticmethod
+    def _normalize_for_match(text: str) -> str:
+        import re
+        return re.sub(r"[^a-z0-9 ]", " ", text.lower()).strip()
+
+    def was_recently_said(self, heard_text: str) -> bool:
+        """Return True if `heard_text` is substantially one of our recent
+        outgoing utterances. Used by the listener to drop the mic's echo
+        of our own speaker without gating the whole mic during TTS.
+
+        Three rules, any one is enough:
+          1. Heard text is contained as a substring in any recent TTS.
+          2. ≥50% of heard words appear in the TTS words.
+          3. Heard is a 1-2 word subset of the TTS words (common Whisper
+             pickup of only the first word or two of a longer TTS phrase).
+        """
+        if not heard_text:
+            return False
+        import time as _t
+        normalised = self._normalize_for_match(heard_text)
+        if not normalised:
+            return False
+        heard_words = [w for w in normalised.split() if w]
+        if not heard_words:
+            return False
+        heard_set = set(heard_words)
+        now = _t.monotonic()
+        with self._recent_lock:
+            fresh = [(t, exp) for t, exp in self._recent_utterances if exp > now]
+            self._recent_utterances = fresh
+            for tts_text, _exp in fresh:
+                tts_words = tts_text.split()
+                tts_set = set(tts_words)
+                if not tts_set:
+                    continue
+                # Rule 1: direct substring (robust for partial phrases)
+                if normalised in tts_text:
+                    return True
+                # Rule 2: ≥50% word overlap relative to heard utterance
+                if len(heard_set & tts_set) / max(1, len(heard_set)) >= 0.5:
+                    return True
+                # Rule 3: 1-2 word heard is a subset of a longer TTS
+                if len(heard_words) <= 2 and heard_set.issubset(tts_set):
+                    return True
+        return False
 
     def say_sync(self, text):
         """Speak text (blocking)."""

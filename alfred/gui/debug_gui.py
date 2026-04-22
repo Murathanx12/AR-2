@@ -210,55 +210,64 @@ class DebugGUI:
             self._log(f'Gesture: {gesture}')
 
     def set_camera_frame(self, frame):
+        """Render the camera panel. No detection is performed here anymore —
+        the FSM runs ArUco once per tick and caches the result on
+        `fsm._last_markers`, and face/obstacle lists are populated by the
+        state handlers. Resizing to the panel size happens BEFORE drawing
+        overlays so all the heavy pygame work is on a ~640×360 surface, not
+        a 1920×1080 one. This alone buys back a lot of FPS.
+        """
         if frame is None or not _HAS_PYGAME or not _HAS_CV2:
             self._camera_surface = None
             return
 
         try:
-            display_frame = frame.copy()
             fsm = self.fsm
 
-            # Draw ArUco markers
-            if fsm and fsm.aruco_detector:
-                markers = fsm.aruco_detector.detect(display_frame)
-                self._detected_markers = markers
-                for m in markers:
-                    pts = m["corners"].astype(int)
-                    cv2.polylines(display_frame, [pts], True, (0, 255, 0), 3)
-                    cx, cy = int(m["center"][0]), int(m["center"][1])
-                    cv2.putText(display_frame, f"ID:{m['id']} sz:{m['size']:.0f}",
-                                (cx - 40, cy - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            # Resize first — overlays draw onto the small buffer.
+            cam_w = int(self.W * 0.55)
+            cam_h = int(self.H * 0.65)
+            small = cv2.resize(frame, (cam_w, cam_h))
+            sx = cam_w / float(frame.shape[1])
+            sy = cam_h / float(frame.shape[0])
 
-            # Draw face boxes
+            # ArUco — reuse FSM's cached detection, don't re-detect.
+            markers = getattr(fsm, "_last_markers", []) if fsm else []
+            self._detected_markers = markers
+            for m in markers:
+                pts = (m["corners"] * [sx, sy]).astype(int)
+                cv2.polylines(small, [pts], True, (0, 255, 0), 2)
+                cx, cy = int(m["center"][0] * sx), int(m["center"][1] * sy)
+                cv2.putText(small, f"ID:{m['id']}",
+                            (cx - 25, cy - 8), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5, (0, 255, 0), 1)
+
+            # Faces (only populated when PersonDetector is loaded)
             self._face_count = 0
             if fsm and fsm._last_faces:
                 self._face_count = len(fsm._last_faces)
                 for face in fsm._last_faces:
                     x, y, w, h = face["bbox"]
-                    conf = face.get("confidence", 0)
-                    cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                    cv2.putText(display_frame, f"Face {conf:.0%}",
-                                (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    x1, y1 = int(x * sx), int(y * sy)
+                    x2, y2 = int((x + w) * sx), int((y + h) * sy)
+                    cv2.rectangle(small, (x1, y1), (x2, y2), (0, 255, 0), 1)
 
-            # Draw obstacle boxes
+            # Obstacles (contour fallback only — YOLO is opt-in)
             if fsm and fsm._last_obstacles:
                 for obs in fsm._last_obstacles:
                     if "bbox" in obs:
                         x, y, w, h = obs["bbox"]
-                        cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
-                        cv2.putText(display_frame, "OBSTACLE",
-                                    (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                        x1, y1 = int(x * sx), int(y * sy)
+                        x2, y2 = int((x + w) * sx), int((y + h) * sy)
+                        cv2.rectangle(small, (x1, y1), (x2, y2), (0, 0, 255), 1)
 
-            # Resize to fit the camera panel
-            cam_w = int(self.W * 0.55)
-            cam_h = int(self.H * 0.65)
-            small = cv2.resize(display_frame, (cam_w, cam_h))
             rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
             self._camera_surface = pygame.surfarray.make_surface(rgb.swapaxes(0, 1))
 
-            # Hand detection count
+            # Hand gestures only run when person_detector is explicitly
+            # loaded (via --enable-person).
             self._hand_count = 0
-            if fsm and fsm.person_detector and frame is not None:
+            if fsm and fsm.person_detector:
                 try:
                     hands = fsm.person_detector.detect_hands(frame)
                     self._hand_count = len(hands)
@@ -268,7 +277,7 @@ class DebugGUI:
                             self.set_gesture(gesture)
                 except Exception:
                     pass
-        except Exception as e:
+        except Exception:
             self._camera_surface = None
 
     def update(self):
@@ -714,9 +723,25 @@ class DebugGUI:
                 if lf: lf.reset()
             self._log("Started line following")
         elif key == pygame.K_SPACE:
+            # Full stop — same path the voice 'stop' intent takes so the
+            # button and the word are equivalent. Kills active TTS, clears
+            # the marker target, resets reroute + hysteresis, drops
+            # queued utterances, flips to IDLE immediately.
             self._pressed = {k: False for k in self._pressed}
             if fsm:
                 fsm.uart.send(cmd_stop())
+                if fsm.line_follower:
+                    fsm.line_follower.debug_vx = 0
+                    fsm.line_follower.debug_vy = 0
+                    fsm.line_follower.debug_omega = 0
+                fsm._aruco_target_id = None
+                fsm._aruco_announced_id = None
+                fsm._aruco_lost_frames = 0
+                fsm._reset_reroute()
+                fsm._last_announced_state = None
+                if fsm.speaker:
+                    fsm.speaker.stop()
+                    fsm.speaker.say("stop")
                 fsm.transition(State.IDLE)
             self._manual_mode = True
             self._log("EMERGENCY STOP")

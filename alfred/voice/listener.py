@@ -142,6 +142,11 @@ class VoiceListener:
         self._wake_detected = False
         self._last_text = ""
         self._muted_until = 0
+        # Actual sample rate negotiated with the mic. Many USB mics (PCM2902
+        # etc.) only support 44.1/48 kHz natively and reject 16 kHz at the
+        # ALSA hw layer. We record at whatever rate works and pass that to
+        # the WAV encoder; OpenAI Whisper handles any sample rate.
+        self._actual_rate = self.SAMPLE_RATE
 
     @property
     def language(self):
@@ -161,9 +166,31 @@ class VoiceListener:
         if not _HAS_OPENAI and not _HAS_GOOGLE_STT and not _HAS_WHISPER and not _HAS_VOSK:
             print("[Voice] No STT engine (set OPENAI_API_KEY or install faster-whisper/vosk)")
             return
+        # Disable hardware AGC on every known-PCM2902 card and pin capture
+        # volume high. Without this the mic gain slides down every time the
+        # robot speaks; input loudness decays toward zero across a session.
+        self._force_fixed_gain()
         self._running = True
         self._thread = threading.Thread(target=self._listen_loop, daemon=True)
         self._thread.start()
+
+    @staticmethod
+    def _force_fixed_gain():
+        """Turn off mic AGC + max out capture volume on any card that
+        supports those controls. Runs once at listener startup."""
+        import subprocess
+        for card in range(6):
+            try:
+                subprocess.run(
+                    ["amixer", "-c", str(card), "set", "Auto Gain Control", "off"],
+                    capture_output=True, timeout=2,
+                )
+                subprocess.run(
+                    ["amixer", "-c", str(card), "set", "Mic", "100%"],
+                    capture_output=True, timeout=2,
+                )
+            except Exception:
+                pass
 
     def stop(self):
         self._running = False
@@ -203,7 +230,7 @@ class VoiceListener:
         with wave.open(wav_buffer, 'wb') as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
-            wf.setframerate(self.SAMPLE_RATE)
+            wf.setframerate(self._actual_rate)  # pass the real capture rate
             wf.writeframes(audio_data)
         wav_buffer.seek(0)
         wav_buffer.name = "audio.wav"
@@ -274,12 +301,13 @@ class VoiceListener:
         if _whisper_model is None:
             return ""
 
-        # Convert raw PCM to WAV in memory
+        # Convert raw PCM to WAV in memory, preserving the actual capture
+        # rate. faster-whisper resamples internally; openai-whisper too.
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, 'wb') as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)  # 16-bit
-            wf.setframerate(self.SAMPLE_RATE)
+            wf.setframerate(self._actual_rate)
             wf.writeframes(audio_data)
         wav_buffer.seek(0)
 
@@ -401,45 +429,64 @@ class VoiceListener:
             candidates.append((i, name))
         def _score(name: str) -> int:
             n = name.lower()
-            if "usb2.0 device" in n:       # known-broken combo dongle on this Pi
-                return -10
+            # Known-broken combo dongle on this Pi — one-buffer-then-silent
+            # capture bug. Never pick it directly, and prefer pipewire (with
+            # its own source-selection policy) over "default" (raw ALSA
+            # default route, which lands right back on this same dongle).
+            if "usb2.0 device" in n:       return -10
             if "pnp" in n:                  return 100
             if "microphone" in n or "mic" in n: return 50
             if "headset" in n:              return 40
             if "usb" in n:                  return 20
-            if "default" in n:              return 5
-            if "pipewire" in n or "pulse" in n: return 3
+            if "pipewire" in n or "pulse" in n: return 10
+            if "default" in n:              return 3
             return 0
         if candidates:
             chosen_idx, chosen_name = max(candidates, key=lambda c: _score(c[1]))
-        # Build an ordered list of attempts. The chosen hw device is best
-        # (direct path, lowest latency) but may reject 16 kHz — in that case
-        # fall through to pipewire/default which resample automatically.
+        # Try the chosen hw device at its NATIVE rate first. The PCM2902-
+        # class USB mics on this Pi only support 44.1 kHz; opening at 16 kHz
+        # would cause ALSA to refuse (caught as [Errno -9997]). We record
+        # at whatever rate the device advertises, then pass that rate
+        # through to the WAV header — OpenAI Whisper accepts any rate.
+        # Pipewire/default are last-resort because pipewire on this Pi
+        # has been observed routing its default source to the broken
+        # card 1 combo dongle even when card 3 (PnP) is present.
         attempts = []
         if chosen_idx is not None:
-            attempts.append(("chosen", chosen_idx, chosen_name))
+            try:
+                info = p.get_device_info_by_index(chosen_idx)
+                native_rate = int(info.get("defaultSampleRate", self.SAMPLE_RATE))
+            except Exception:
+                native_rate = self.SAMPLE_RATE
+            # Prefer native rate; fall back to 16 kHz if device supports both.
+            rates_to_try = [native_rate]
+            if native_rate != self.SAMPLE_RATE:
+                rates_to_try.append(self.SAMPLE_RATE)
+            for rate in rates_to_try:
+                attempts.append(("chosen", chosen_idx, chosen_name, rate))
         for i, name in candidates:
             if "pipewire" in name.lower():
-                attempts.append(("pipewire", i, name))
+                attempts.append(("pipewire", i, name, self.SAMPLE_RATE))
         for i, name in candidates:
             if name.lower() == "default":
-                attempts.append(("default", i, name))
+                attempts.append(("default", i, name, self.SAMPLE_RATE))
 
         stream = None
         last_err = None
-        for label, idx, name in attempts:
+        for label, idx, name, rate in attempts:
             try:
                 stream = p.open(
                     format=pyaudio.paInt16, channels=1,
-                    rate=self.SAMPLE_RATE, input=True,
+                    rate=rate, input=True,
                     input_device_index=idx,
                     frames_per_buffer=self.CHUNK_SIZE,
                 )
-                print(f"[Voice] Using mic ({label}): idx={idx} {name!r}")
+                self._actual_rate = rate
+                print(f"[Voice] Using mic ({label}): idx={idx} {name!r} @ {rate} Hz")
                 break
             except Exception as e:
                 last_err = e
-                print(f"[Voice] mic idx={idx} ({label}) rejected @ {self.SAMPLE_RATE} Hz: {e}")
+                print(f"[Voice] mic idx={idx} ({label}) rejected @ {rate} Hz: {e}")
                 continue
         if stream is None:
             print(f"[Voice] Failed to open any mic: {last_err}")
@@ -483,20 +530,31 @@ class VoiceListener:
         silence_start = 0
         speech_start = 0
 
+        def _drain():
+            """Throw away any pyaudio frames that accumulated while we were
+            elsewhere (transcribing, speaking). Without this, after a ~1 s
+            cloud round-trip the backlog contains ~40+ stale chunks and the
+            VAD processes them as if the user had just spoken again."""
+            try:
+                while stream.get_read_available() >= self.CHUNK_SIZE:
+                    stream.read(self.CHUNK_SIZE, exception_on_overflow=False)
+            except Exception:
+                pass
+
         while self._running:
             try:
                 data = stream.read(self.CHUNK_SIZE, exception_on_overflow=False)
                 if not data:
                     continue
 
-                # Mute during TTS
-                if self._speaker and self._speaker.is_speaking:
-                    self._muted_until = time.monotonic() + 1.0
-                    audio_buffer.clear()
-                    is_speaking = False
-                    continue
-                if time.monotonic() < self._muted_until:
-                    continue
+                # NOTE: TTS mic-mute was removed per user request — it was
+                # keeping the mic blind for the entire duration of each
+                # state-transition announcement, causing the "first command
+                # works, subsequent commands drop" symptom. We drain stale
+                # backlog after transcription instead. Trade-off: the robot
+                # may briefly hear its own speaker. Whisper filters out
+                # typical TTS phrases and the PnP mic + desk-speaker
+                # geometry on this setup has low echo coupling.
 
                 energy = self._rms(data)
 
@@ -514,6 +572,7 @@ class VoiceListener:
                         self._process_audio(bytes(audio_buffer))
                         audio_buffer.clear()
                         is_speaking = False
+                        _drain()
 
                 elif is_speaking:
                     # Silence after speech
@@ -521,13 +580,17 @@ class VoiceListener:
                     if silence_start == 0:
                         silence_start = time.monotonic()
                     elif time.monotonic() - silence_start >= self.SILENCE_DURATION:
-                        # End of utterance
+                        # End of utterance → transcribe. The cloud call takes
+                        # ~300-700 ms; during that time pyaudio's internal ring
+                        # buffer fills with stale frames that we must drop
+                        # before resuming VAD.
                         duration = time.monotonic() - speech_start
                         if duration >= self.MIN_SPEECH_DURATION:
                             self._process_audio(bytes(audio_buffer))
                         audio_buffer.clear()
                         is_speaking = False
                         silence_start = 0
+                        _drain()
 
             except Exception as e:
                 logger.error(f"Voice error: {e}")
@@ -557,9 +620,36 @@ class VoiceListener:
 
         # Filter out whisper hallucinations (common on silence)
         junk = {"you", "thank you", "thanks for watching", "bye", "...", "",
-                "thank you.", "thanks.", "you.", "bye."}
-        if text.rstrip(".!,") in junk or text in junk:
+                "thank you.", "thanks.", "you.", "bye.", "bye!", "thanks",
+                "thanks!", "oh", "uh", "um", "hmm", "uhh", "hmm.", "oh.",
+                "ok.", "okay.", "yeah.", "right.", "so."}
+        stripped = text.rstrip(".!,?").lower()
+        if stripped in junk or text.lower() in junk:
             return
+
+        # Reject single-word utterances that aren't real commands. Whisper
+        # likes to hallucinate short words on coughs/footsteps/taps. "stop"
+        # and "halt" and "freeze" are the only 1-word commands we honour.
+        tokens = stripped.split()
+        if len(tokens) == 1:
+            one_word_allowed = {"stop", "halt", "freeze", "hello", "hey",
+                                "hi", "sonny", "sleep", "dance", "patrol",
+                                "selfie"}
+            if tokens[0] not in one_word_allowed:
+                logger.debug(f"[Voice] Dropped 1-word non-command: '{text}'")
+                return
+
+        # Self-speech suppression: if the speaker just said this out loud,
+        # the mic is hearing its own echo. Drop it. "stop" and wake words
+        # bypass this so the user can still interrupt the robot.
+        if self._speaker and self._speaker.was_recently_said(text):
+            lower = text.lower()
+            is_interrupt = any(w in lower for w in ("stop", "halt", "freeze"))
+            is_wake = any(w in lower for w in ("hello sonny", "hey sonny", "hi sonny"))
+            if not (is_interrupt or is_wake):
+                logger.debug(f"[Voice] Dropped self-echo: '{text}'")
+                print(f"[Voice] (self-echo dropped): '{text}'")
+                return
 
         # Filter out long sentences — commands are max ~6 words
         # Background conversation like "i was taking all three by the next one" is not a command
@@ -584,7 +674,7 @@ class VoiceListener:
                     continue
 
                 if self._speaker and self._speaker.is_speaking:
-                    self._muted_until = time.monotonic() + 1.0
+                    self._muted_until = time.monotonic() + 0.2
                     continue
                 if time.monotonic() < self._muted_until:
                     continue

@@ -301,7 +301,11 @@ def main():
     parser.add_argument("--no-ultrasonic", action="store_true",
                         help="Ignore ultrasonic sensor readings (use when HC-SR04 are unplugged)")
     parser.add_argument("--no-yolo-obstacle", action="store_true",
-                        help="Disable YOLO/contour obstacle detection (skip REROUTING entirely)")
+                        help="Silence YOLO obstacle check (doesn't stop YOLO loading — see --enable-yolo)")
+    parser.add_argument("--enable-yolo", action="store_true",
+                        help="Load YOLO object detector (off by default — saves 50-100ms/frame)")
+    parser.add_argument("--enable-person", action="store_true",
+                        help="Load MediaPipe person/face/hand detector (off by default)")
     parser.add_argument("--speed", type=int, default=CONFIG.speed.default_speed,
                         help=f"Override default speed (default: {CONFIG.speed.default_speed})")
     args = parser.parse_args()
@@ -326,6 +330,8 @@ def main():
         vision_ai_interval=args.vision_ai_interval,
         no_ultrasonic=args.no_ultrasonic,
         no_yolo_obstacle=args.no_yolo_obstacle,
+        enable_yolo=args.enable_yolo,
+        enable_person=args.enable_person,
     )
 
     if args.speed != CONFIG.speed.default_speed:

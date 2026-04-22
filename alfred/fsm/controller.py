@@ -66,19 +66,26 @@ class AlfredFSM:
 
     def __init__(self, config=None, headless=False, no_voice=False, no_camera=False,
                  use_vision_ai=False, vision_ai_interval=5.0,
-                 no_ultrasonic=False, no_yolo_obstacle=False):
+                 no_ultrasonic=False, no_yolo_obstacle=False,
+                 enable_yolo=False, enable_person=False):
         self.config = config or CONFIG
         self.headless = headless
         self.no_voice = no_voice
         self.no_camera = no_camera
         self.use_vision_ai = use_vision_ai
         self.vision_ai_interval = vision_ai_interval
-        # Runtime kill-switches for flaky hardware / false positives. Ultrasonic
-        # is wired to the burnt logic board → noisy phantom readings trigger
-        # BLOCKED. YOLO during ARUCO_APPROACH trips on the marker itself or
-        # nearby furniture → REROUTE fires immediately.
+        # Runtime kill-switches. `no_ultrasonic` ignores HC-SR04 readings when
+        # the sensor board is offline / noisy. `no_yolo_obstacle` still
+        # silences the check even if YOLO is loaded. `enable_yolo` /
+        # `enable_person` are the new defaults-off loading gates — vision
+        # models are NOT imported unless explicitly requested. This is the
+        # biggest FPS win: the Pi 5 was spending 50-100 ms/frame on YOLO
+        # inference and ~15 ms on MediaPipe init+warmup on every detect call.
+        # ArUco is the only vision that actually runs every tick.
         self.no_ultrasonic = no_ultrasonic
         self.no_yolo_obstacle = no_yolo_obstacle
+        self.enable_yolo = enable_yolo
+        self.enable_person = enable_person
 
         # Core subsystems (always created)
         self.uart = UARTBridge(
@@ -111,25 +118,34 @@ class AlfredFSM:
                 )
             except Exception as e:
                 print(f"[Init] ArUco unavailable: {e}")
+            # Contour obstacle detector is cheap — keep it available as the
+            # lightweight fallback path when camera-obstacle is enabled.
             try:
                 from alfred.vision.obstacle import ObstacleDetector
                 self.obstacle_detector = ObstacleDetector()
             except Exception as e:
                 print(f"[Init] Obstacle detector unavailable: {e}")
-            try:
-                from alfred.vision.person import PersonDetector
-                self.person_detector = PersonDetector()
-            except Exception as e:
-                print(f"[Init] Person detector unavailable: {e}")
+            # MediaPipe person/face/gesture detection — opt-in. Loading it
+            # warms up TensorFlow Lite models which take ~300 ms on Pi 5.
+            if enable_person:
+                try:
+                    from alfred.vision.person import PersonDetector
+                    self.person_detector = PersonDetector()
+                    print("[Init] MediaPipe person detector ready (opt-in)")
+                except Exception as e:
+                    print(f"[Init] Person detector unavailable: {e}")
 
-        # YOLO detector (offline, primary obstacle/person detection)
+        # YOLO — opt-in only. Inference runs ~50-100 ms/frame on Pi 5 CPU,
+        # which is the single biggest source of FPS drop when the FSM calls
+        # `is_path_clear` or `get_obstacles` per tick. Ultrasonic is the
+        # primary R4 sensor; YOLO is only useful when user explicitly asks.
         self.yolo_detector = None
-        if not no_camera:
+        if enable_yolo and not no_camera:
             try:
                 from alfred.vision.yolo_detector import YOLODetector
                 self.yolo_detector = YOLODetector()
                 if self.yolo_detector.is_available:
-                    print("[Init] YOLO object detector ready (offline)")
+                    print("[Init] YOLO object detector ready (opt-in)")
                 else:
                     self.yolo_detector = None
             except Exception:
@@ -272,6 +288,9 @@ class AlfredFSM:
         self._last_frame = None
         self._last_faces = []
         self._last_obstacles = []
+        # Cache one ArUco detection per tick — GUI reuses this instead of
+        # running its own detect, saving ~40 ms per frame at 1080p.
+        self._last_markers = []
         self._listen_timeout = None
         # Person-follow state
         self._person_smooth_cx = None
@@ -614,6 +633,15 @@ class AlfredFSM:
         # Read camera frame (shared across states)
         if self.camera and self.camera.is_available:
             self._last_frame = self.camera.read_frame()
+            # Run ArUco detection exactly once per tick — the result is cached
+            # for any state handler + the GUI.
+            if self._last_frame is not None and self.aruco_detector:
+                try:
+                    self._last_markers = self.aruco_detector.detect(self._last_frame)
+                except Exception:
+                    self._last_markers = []
+            else:
+                self._last_markers = []
             if self.gui and self._last_frame is not None:
                 self.gui.set_camera_frame(self._last_frame)
 
@@ -871,7 +899,7 @@ class AlfredFSM:
             return
 
         if self.aruco_detector and self._last_frame is not None:
-            markers = self.aruco_detector.detect(self._last_frame)
+            markers = self._last_markers  # cached this tick — no re-detect
             if markers:
                 target = None
 
@@ -922,7 +950,7 @@ class AlfredFSM:
             self.transition(State.IDLE)
             return
 
-        markers = self.aruco_detector.detect(self._last_frame)
+        markers = self._last_markers  # cached this tick
 
         # Find target marker (or any marker if target_id is None)
         target_marker = None
@@ -945,17 +973,13 @@ class AlfredFSM:
             self.transition(State.BLOCKED)
             return
 
-        # Camera-based obstacle avoidance: if something (person / box / chair /
-        # YOLO-labelled object) is sitting in the centre of the path, strafe
-        # around it instead of driving through. But: if the target tag is
-        # visible in the current frame we have line-of-sight to it — YOLO is
-        # probably flagging the tag's stand or nearby furniture, not an actual
-        # blocker. Trust the tag, skip the reroute.
-        if target_marker is None and self._check_camera_obstacle():
-            self._reroute_from = State.ARUCO_APPROACH
-            self._reset_reroute()  # next REROUTING tick will initialise fresh
-            self.transition(State.REROUTING)
-            return
+        # NOTE: no camera-obstacle check during approach. Ultrasonic is the
+        # primary R4 sensor now; the contour fallback (which runs when YOLO
+        # is off, the default) false-positives on the marker stand, the
+        # tag's border, and shadows, which causes REROUTE↔BLOCKED flip-flop
+        # storms that muted the mic via rapid-fire TTS. If you need reroute
+        # during approach, re-enable with --enable-yolo (real obstacle
+        # detection) and uncomment the branch below.
 
         if target_marker is None:
             # Hysteresis — a single lost detection isn't a lost marker.
@@ -1122,9 +1146,9 @@ class AlfredFSM:
             self.transition(State.IDLE)
             return
 
-        # Keep marker memory fresh in every phase.
+        # Keep marker memory fresh in every phase (cached this tick).
         if self.aruco_detector:
-            markers = self.aruco_detector.detect(self._last_frame)
+            markers = self._last_markers
             if markers:
                 tgt = None
                 if self._aruco_target_id is not None:
@@ -1259,7 +1283,7 @@ class AlfredFSM:
             # Spin opposite direction. Stop the moment the target marker shows.
             target_visible = False
             if self.aruco_detector:
-                markers = self.aruco_detector.detect(self._last_frame)
+                markers = self._last_markers
                 if self._aruco_target_id is not None:
                     target_visible = any(m["id"] == self._aruco_target_id for m in markers)
                 else:
