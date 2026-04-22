@@ -214,10 +214,10 @@ def _print_dashboard(fsm, event_log):
 
     # Read sensor data
     ir_bits = [0, 0, 0, 0, 0]
-    dist_cm = -1.0
+    dists = {"left": -1.0, "center": -1.0, "right": -1.0}
     if uart and uart.is_open:
         ir_bits = uart.get_ir_bits()
-        dist_cm = uart.get_distance()
+        dists = uart.get_distances()
 
     vx = lf.debug_vx if lf else 0
     vy = lf.debug_vy if lf else 0
@@ -232,13 +232,16 @@ def _print_dashboard(fsm, event_log):
         for i in range(5)
     )
 
-    # Ultrasonic
-    if dist_cm > 0 and dist_cm < 20:
-        dist_str = f"\033[91m{dist_cm:.0f}cm BLOCKED\033[0m"
-    elif dist_cm > 0:
-        dist_str = f"\033[92m{dist_cm:.0f}cm\033[0m"
-    else:
-        dist_str = "\033[90m---\033[0m"
+    # Ultrasonic (3 sensors)
+    def _fmt_dist(d):
+        if d > 0 and d < 20:
+            return f"\033[91m{d:.0f}cm!\033[0m"
+        elif d > 0:
+            return f"\033[92m{d:.0f}cm\033[0m"
+        return "\033[90m---\033[0m"
+    dist_l_str = _fmt_dist(dists["left"])
+    dist_c_str = _fmt_dist(dists["center"])
+    dist_r_str = _fmt_dist(dists["right"])
 
     # Voice
     voice_text = ""
@@ -263,7 +266,7 @@ def _print_dashboard(fsm, event_log):
     print(f"  │  {ir_display}  │")
     print(f"  └─────────────────────────────────────────────┘")
     print()
-    print(f"  Ultrasonic:  {dist_str}")
+    print(f"  Ultrasonic:  L:{dist_l_str}  C:{dist_c_str}  R:{dist_r_str}")
     print(f"  Movement:    vx:{vx:+4d}   vy:{vy:+4d}   omega:{omega:+4d}")
     print(f"  Faces:       {face_count}    Voice: \"{voice_text}\"")
     print()

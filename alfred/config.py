@@ -63,10 +63,12 @@ class UARTConfig:
 
 @dataclass(frozen=True)
 class UltrasonicConfig:
-    """Ultrasonic sensor (HC-SR04) — R4 obstacle detection."""
-    trig_pin: int = 4     # ESP32 GPIO pin for trigger
-    echo_pin: int = 2     # ESP32 GPIO pin for echo
+    """3x Ultrasonic sensors (HC-SR04) — R4 obstacle detection."""
     threshold_cm: float = 20.0  # obstacle detection threshold
+    # ESP32 GPIO pins (for reference only — firmware handles hardware)
+    pins_left: Tuple[int, int] = (8, 9)      # trig, echo
+    pins_center: Tuple[int, int] = (4, 2)    # trig, echo
+    pins_right: Tuple[int, int] = (18, 1)    # trig, echo
 
 
 @dataclass(frozen=True)
@@ -84,11 +86,8 @@ class VoiceConfig:
 class VisionConfig:
     """Vision subsystem."""
     camera_index: int = 1
-    # 1280x720 @ 24fps is enough for ArUco detection and keeps the Pi+USB
-    # camera pipeline responsive. 1920x1080 caused visible capture lag and
-    # made marker tracking oscillate.
-    resolution: Tuple[int, int] = (1280, 720)
-    fps: int = 24
+    resolution: Tuple[int, int] = (640, 480)
+    fps: int = 30
     aruco_dict: str = "DICT_4X4_50"
     aruco_stop_size: int = 150  # legacy, unused — see ArucoApproach.STOP_DIST_M
     bev_src_points: Tuple[Tuple[int, int], ...] = ()

@@ -398,16 +398,19 @@ class AlfredFSM:
             self.uart.send(cmd_led_pattern(0))  # solid
 
     def _check_ultrasonic_obstacle(self) -> bool:
-        """Check ultrasonic sensor for obstacles (R4).
+        """Check any ultrasonic sensor for obstacles (R4).
 
-        Returns True only if sensor is connected AND obstacle within threshold.
+        Returns True only if any sensor is connected AND obstacle within threshold.
         Returns False if no sensor data (distance == -1).
         """
-        dist = self.uart.get_distance()
-        # -1 means no sensor reading (not connected or no echo)
-        if dist < 0:
-            return False
-        return 0 < dist < OBSTACLE_THRESHOLD_CM
+        return self.uart.is_obstacle_detected(OBSTACLE_THRESHOLD_CM)
+
+    def _get_obstacle_direction(self) -> str:
+        """Return which ultrasonic sensor sees the closest obstacle.
+
+        Returns 'left', 'center', 'right', or 'none'.
+        """
+        return self.uart.get_obstacle_direction(OBSTACLE_THRESHOLD_CM)
 
     def _check_camera_obstacle(self) -> bool:
         """Check camera-based obstacle detection using YOLO or contour fallback (R4).
@@ -942,7 +945,10 @@ class AlfredFSM:
         self.transition(State.IDLE)
 
     def _tick_blocked(self):
-        """Stop and wait for obstacle to clear (R4)."""
+        """Stop and wait for obstacle to clear (R4).
+
+        Uses directional ultrasonic data to announce which side is blocked.
+        """
         self.uart.send(cmd_stop())
         self.line_follower.debug_vx = 0
         self.line_follower.debug_vy = 0
@@ -972,6 +978,7 @@ class AlfredFSM:
                 self.transition(State.IDLE)
 
     def _tick_rerouting(self):
+<<<<<<< HEAD
         """Hybrid obstacle-avoidance manoeuvre — curves smoothly if the
         obstacle is still far, falls back to rotate-drive-rotate if close.
 

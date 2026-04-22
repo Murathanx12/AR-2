@@ -7,7 +7,7 @@ Known Issues (Apr 20, 2026)
 
 1. ESP32 motors not responding — UART connects but motors don't spin. Suspected hardware (wiring/short/battery). Run scripts/test_esp32.py to diagnose. CRITICAL for demo.
 2. USB microphone weak — only picks up from ~30cm. WORKAROUND: use phone as wireless mic via web dashboard (http://<pi-ip>:8080, hold-to-talk button).
-3. Obstacle detection — YOLO (offline, primary) + ultrasonic HC-SR04 (when wired). OpenAI Vision scene analyzer is opt-in via `--vision-ai` flag (off by default to save API budget).
+3. Obstacle detection — YOLO (offline, primary) + 3x ultrasonic HC-SR04 (left/center/right, ~90° coverage). OpenAI Vision scene analyzer is opt-in via `--vision-ai` flag (off by default to save API budget).
 4. MediaPipe not installed on Pi — person/gesture detection unavailable. Install: pip install mediapipe
 5. OpenCV ArUco API — Pi has older OpenCV, code supports both old and new API. If ArUco fails, check cv2 version.
 6. USB hub power — camera and mic must be plugged directly into Pi USB ports, NOT through the USB hub.
@@ -60,7 +60,7 @@ Purchased (additional):
 - USB-C to USB-C PD cable 1m
 - 4x SG90 9g servos + mounting brackets (robot arm, PCA9685 ch1-4)
 - LM2596 buck converter 12V→5V 3A (servo power from battery)
-- HC-SR04 ultrasonic spare
+- 3x HC-SR04 ultrasonic sensors (left/center/right)
 - USB WiFi adapter RTL8811AU with external antenna
 - USB 3.0 4-port powered hub
 - M2/M2.5/M3 bolt+nut+allen key assortment kit
@@ -70,7 +70,7 @@ On-robot peripherals:
 - PCA9685 16-channel servo controller — head tilt (ch0) + left arm (ch1-2) + right arm (ch3-4)
 - 4x WS2812B NeoPixel LEDs (GPIO48)
 - Piezo buzzer (GPIO46)
-- HC-SR04 ultrasonic (GPIO4 trig, GPIO2 echo)
+- 3x HC-SR04 ultrasonic: Left (GPIO8 trig, GPIO9 echo), Center (GPIO4 trig, GPIO2 echo), Right (GPIO18 trig, GPIO1 echo)
 - 5x TCRT5000 IR line sensors (GPIO 5,6,7,15,45)
 
 Servo Arm Layout (PCA9685):
@@ -86,7 +86,7 @@ Competition Requirements (Minilab 6 / Project Alfred)
 R1: Voice commands — wake phrase "Hello Sonny", FOLLOW TRACK, GO TO QR CODE. OpenAI Whisper API (primary) + Google STT (fallback) + GPT-4o-mini smart intent classification. ✅
 R2: Line-following delivery. IR sensors + weighted algorithmic control. ✅ (needs ESP32 hardware fix)
 R3: ArUco marker approach (1-50). Visual-only with EMA smoothing. Say "go to marker 5" or any number 1-50. ✅ (needs ESP32)
-R4: Obstacle detection — ultrasonic HC-SR04 + OpenAI Vision scene analyzer for smart understanding. ✅ (needs ultrasonic wired)
+R4: Obstacle detection — 3x ultrasonic HC-SR04 (L/C/R, ~90° coverage) + YOLO + OpenAI Vision scene analyzer. ✅ (needs ultrasonic wired)
 R5: Intention indicators — NeoPixel LEDs per state, TTS (piper/espeak-ng), buzzer, OLED eyes, 14" demo face GUI, arm gestures. ✅
 EC1: Gesture recognition — MediaPipe hands, 6 gestures, gesture→action in patrol. ✅ (needs mediapipe install)
 EC2: Autonomous rerouting — obstacle_avoider.py potential field. ✅ (basic)
@@ -117,7 +117,7 @@ Voice System Design
 Camera System
 
 - USB camera auto-detected (scans indices 0-9, uses V4L2 backend to avoid GStreamer issues)
-- **Capture: 1280×720 @ 24 fps, MJPG fourcc** (set in `config.py :: VisionConfig`). YUYV uncompressed at 1080p saturated USB 2.0 and locked the FSM to ~10 fps; MJPG at 720p comfortably sustains 24 fps+ with ArUco detect running ~20 ms/frame. `CameraManager.actual_fps` is logged every ~5 s.
+- **Capture: 640×480 @ 30 fps** (set in `config.py :: VisionConfig`). Same FOV as 1080p, ~6x fewer pixels to process. ArUco detection reliable to ~1.5m for 5cm markers at this resolution.
 - Camera MUST be plugged directly into Pi USB port (not through hub)
 - ArUco: DICT_4X4_50 markers 0-49, supports both old and new OpenCV API
 - **ArUco approach is distance-based, not pixel-size-based.** `ArucoApproach._distance_m(pixel_size, frame_width)` uses the pinhole model with `PHYSICAL_MARKER_M = 0.05` (5 cm printed tag) and `FOCAL_RATIO = 0.8` (≈ focal_length_px / frame_width for typical USB webcams). Stop target: `STOP_DIST_M = 0.20` (20 cm), hold band 0.15–0.30 m, re-engage beyond 0.35 m. Tune `PHYSICAL_MARKER_M` if your printed marker isn't 5 cm; tune `FOCAL_RATIO` after measuring a known distance if the stop point is consistently off.
@@ -183,7 +183,9 @@ buzzer:freq,duration_ms
 UART Protocol (ESP32 → Pi)
 
 IR_STATUS:XX (5-bit sensor mask, 20Hz)
-DIST:XX.X (ultrasonic cm, 10Hz)
+DIST_L:XX.X (left ultrasonic cm, 10Hz)
+DIST_C:XX.X (center ultrasonic cm, 10Hz)
+DIST_R:XX.X (right ultrasonic cm, 10Hz)
 
 V4 Modules
 

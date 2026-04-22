@@ -1,6 +1,6 @@
 """Thread-safe UART bridge for ESP32 communication.
 
-Reads IR_STATUS and DIST (ultrasonic) messages from ESP32.
+Reads IR_STATUS and DIST_L/DIST_C/DIST_R (3x ultrasonic) messages from ESP32.
 Sends motor, LED, and buzzer commands to ESP32.
 """
 
@@ -32,7 +32,9 @@ class UARTBridge:
         self._ser = None
         self._ir_status = 0
         self._ir_lock = threading.Lock()
-        self._distance_cm = -1.0  # ultrasonic distance, -1 = no reading
+        self._dist_left = -1.0
+        self._dist_center = -1.0
+        self._dist_right = -1.0
         self._dist_lock = threading.Lock()
         self._running = False
         self._thread = None
@@ -94,28 +96,42 @@ class UARTBridge:
         return [(v >> i) & 1 for i in range(5)]
 
     def get_distance(self) -> float:
-        """Return latest ultrasonic distance in cm, or -1 if no reading."""
+        """Return minimum of all ultrasonic readings (backwards compatible)."""
         with self._dist_lock:
-            return self._distance_cm
+            dists = [d for d in (self._dist_left, self._dist_center, self._dist_right) if d >= 0]
+            return min(dists) if dists else -1.0
+
+    def get_distances(self) -> dict:
+        """Return all 3 ultrasonic distances: left, center, right."""
+        with self._dist_lock:
+            return {
+                "left": self._dist_left,
+                "center": self._dist_center,
+                "right": self._dist_right,
+            }
 
     def is_obstacle_detected(self, threshold_cm: float = 20.0) -> bool:
-        """Check if an obstacle is within threshold distance.
-
-        Args:
-            threshold_cm: Distance threshold in cm.
-
-        Returns:
-            True if obstacle detected closer than threshold.
-        """
+        """Check if any sensor detects obstacle within threshold."""
         dist = self.get_distance()
         return 0 < dist < threshold_cm
+
+    def get_obstacle_direction(self, threshold_cm: float = 20.0) -> str:
+        """Return which side has the closest obstacle, or 'none'.
+
+        Returns one of: 'left', 'center', 'right', 'none'.
+        """
+        dists = self.get_distances()
+        blocked = {k: v for k, v in dists.items() if 0 < v < threshold_cm}
+        if not blocked:
+            return "none"
+        return min(blocked, key=blocked.get)
 
     @property
     def is_open(self) -> bool:
         return self._ser is not None and self._ser.is_open
 
     def _reader_loop(self):
-        """Daemon thread: read IR_STATUS and DIST lines, send periodic pings."""
+        """Daemon thread: read IR_STATUS and DIST_L/C/R lines, send periodic pings."""
         last_ping = time.monotonic()
         while self._running:
             try:
@@ -129,12 +145,29 @@ class UARTBridge:
                                 self._ir_status = int(value_str) & 0x1F
                         except ValueError:
                             pass
-                    elif text.startswith("DIST:"):
+                    elif text.startswith("DIST_L:"):
                         try:
-                            _, value_str = text.split(":", 1)
-                            dist = float(value_str)
                             with self._dist_lock:
-                                self._distance_cm = dist
+                                self._dist_left = float(text.split(":", 1)[1])
+                        except ValueError:
+                            pass
+                    elif text.startswith("DIST_C:"):
+                        try:
+                            with self._dist_lock:
+                                self._dist_center = float(text.split(":", 1)[1])
+                        except ValueError:
+                            pass
+                    elif text.startswith("DIST_R:"):
+                        try:
+                            with self._dist_lock:
+                                self._dist_right = float(text.split(":", 1)[1])
+                        except ValueError:
+                            pass
+                    elif text.startswith("DIST:"):
+                        # Legacy single-sensor fallback
+                        try:
+                            with self._dist_lock:
+                                self._dist_center = float(text.split(":", 1)[1])
                         except ValueError:
                             pass
 

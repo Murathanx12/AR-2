@@ -34,9 +34,13 @@
 
 const int irPins[5] = {IR_W_PIN, IR_NW_PIN, IR_N_PIN, IR_NE_PIN, IR_E_PIN};
 
-// ---------------- Ultrasonic sensor (HC-SR04) — R4 obstacle detection ------
-#define TRIG_PIN 4   // GPIO4 — trigger
-#define ECHO_PIN 2   // GPIO2 — echo (use voltage divider for 3.3V!)
+// ---------------- Ultrasonic sensors (3x HC-SR04) — R4 obstacle detection --
+#define TRIG_L_PIN 8    // GPIO8  — left trigger
+#define ECHO_L_PIN 9    // GPIO9  — left echo (voltage divider!)
+#define TRIG_C_PIN 4    // GPIO4  — center trigger (original)
+#define ECHO_C_PIN 2    // GPIO2  — center echo (voltage divider!)
+#define TRIG_R_PIN 18   // GPIO18 — right trigger
+#define ECHO_R_PIN 1    // GPIO1  — right echo (voltage divider!)
 
 // ---------------- NeoPixel LEDs — R5 intention indicators ------------------
 #define NEOPIXEL_PIN 48   // GPIO48 — data line
@@ -337,17 +341,17 @@ uint8_t readIrStatus()
 }
 
 // ============================================================
-// Ultrasonic sensor (HC-SR04) — R4 obstacle detection
+// Ultrasonic sensors (3x HC-SR04) — R4 obstacle detection
 // ============================================================
-float readUltrasonic()
+float readUltrasonicSingle(int trigPin, int echoPin)
 {
-  digitalWrite(TRIG_PIN, LOW);
+  digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
+  digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
+  digitalWrite(trigPin, LOW);
 
-  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout (~5m max)
+  long duration = pulseIn(echoPin, HIGH, 30000); // 30ms timeout (~5m max)
   if (duration == 0) return -1.0; // timeout = no echo
   return duration * 0.034 / 2.0;  // convert to cm
 }
@@ -579,9 +583,13 @@ void setup()
     pinMode(irPins[i], INPUT);
   }
 
-  // Ultrasonic sensor
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
+  // Ultrasonic sensors (3x HC-SR04)
+  pinMode(TRIG_L_PIN, OUTPUT);
+  pinMode(ECHO_L_PIN, INPUT);
+  pinMode(TRIG_C_PIN, OUTPUT);
+  pinMode(ECHO_C_PIN, INPUT);
+  pinMode(TRIG_R_PIN, OUTPUT);
+  pinMode(ECHO_R_PIN, INPUT);
 
   // NeoPixel LEDs
   strip.begin();
@@ -594,7 +602,7 @@ void setup()
   SERIAL.println("ESP32 V4 booting...");
   SERIAL.println("UART2 on GPIO16(RX)/GPIO17(TX) at 115200");
 
-  uart2.println("ESP32 Ready (V4 with ultrasonic + LED + buzzer)");
+  uart2.println("ESP32 Ready (V4 with 3x ultrasonic + LED + buzzer)");
   SERIAL.println("ESP32 Ready — sent hello on UART2");
   IO_init();
 
@@ -637,13 +645,18 @@ void loop()
     lastIrSend = now;
   }
 
-  // --- Broadcast ultrasonic distance at 10 Hz ---
+  // --- Broadcast 3x ultrasonic distances at 10 Hz ---
+  // Read sequentially with brief pauses to avoid echo crosstalk
   if (now - lastDistSend >= DIST_SEND_INTERVAL) {
-    float dist = readUltrasonic();
-    if (dist >= 0) {
-      uart2.print("DIST:");
-      uart2.println(dist, 1);
-    }
+    float distL = readUltrasonicSingle(TRIG_L_PIN, ECHO_L_PIN);
+    delayMicroseconds(500);
+    float distC = readUltrasonicSingle(TRIG_C_PIN, ECHO_C_PIN);
+    delayMicroseconds(500);
+    float distR = readUltrasonicSingle(TRIG_R_PIN, ECHO_R_PIN);
+
+    if (distL >= 0) { uart2.print("DIST_L:"); uart2.println(distL, 1); }
+    if (distC >= 0) { uart2.print("DIST_C:"); uart2.println(distC, 1); }
+    if (distR >= 0) { uart2.print("DIST_R:"); uart2.println(distR, 1); }
     lastDistSend = now;
   }
 
