@@ -529,12 +529,13 @@ class VoiceListener:
         is_speaking = False
         silence_start = 0
         speech_start = 0
+        was_tts_active = False
+        last_gain_refresh = time.monotonic()
 
         def _drain():
             """Throw away any pyaudio frames that accumulated while we were
-            elsewhere (transcribing, speaking). Without this, after a ~1 s
-            cloud round-trip the backlog contains ~40+ stale chunks and the
-            VAD processes them as if the user had just spoken again."""
+            elsewhere (transcribing, speaking). Without this, stale chunks
+            are processed as fresh speech."""
             try:
                 while stream.get_read_available() >= self.CHUNK_SIZE:
                     stream.read(self.CHUNK_SIZE, exception_on_overflow=False)
@@ -547,14 +548,27 @@ class VoiceListener:
                 if not data:
                     continue
 
-                # NOTE: TTS mic-mute was removed per user request — it was
-                # keeping the mic blind for the entire duration of each
-                # state-transition announcement, causing the "first command
-                # works, subsequent commands drop" symptom. We drain stale
-                # backlog after transcription instead. Trade-off: the robot
-                # may briefly hear its own speaker. Whisper filters out
-                # typical TTS phrases and the PnP mic + desk-speaker
-                # geometry on this setup has low echo coupling.
+                # TTS gate: while the speaker is actively playing audio we
+                # don't process input (mic would hear the speaker and
+                # transcribe it). The moment TTS ends, we drain pyaudio's
+                # backlog and the VAD resumes from a clean slate. No
+                # padding, no extension — just follow the speaker state.
+                tts_active = bool(self._speaker and self._speaker.is_speaking)
+                if tts_active:
+                    audio_buffer.clear()
+                    is_speaking = False
+                    silence_start = 0
+                    was_tts_active = True
+                    continue
+                if was_tts_active:
+                    _drain()
+                    was_tts_active = False
+
+                # Periodic re-pin of mic gain — the PCM2902 or USB driver
+                # sometimes drifts capture volume down across long sessions.
+                if time.monotonic() - last_gain_refresh > 10.0:
+                    self._force_fixed_gain()
+                    last_gain_refresh = time.monotonic()
 
                 energy = self._rms(data)
 
@@ -618,38 +632,14 @@ class VoiceListener:
         if not text:
             return
 
-        # Filter out whisper hallucinations (common on silence)
+        # Filter out whisper hallucinations (common on silence — "you", "thank
+        # you", "...", etc. that Whisper invents when given near-silent audio)
         junk = {"you", "thank you", "thanks for watching", "bye", "...", "",
                 "thank you.", "thanks.", "you.", "bye.", "bye!", "thanks",
-                "thanks!", "oh", "uh", "um", "hmm", "uhh", "hmm.", "oh.",
-                "ok.", "okay.", "yeah.", "right.", "so."}
+                "thanks!"}
         stripped = text.rstrip(".!,?").lower()
         if stripped in junk or text.lower() in junk:
             return
-
-        # Reject single-word utterances that aren't real commands. Whisper
-        # likes to hallucinate short words on coughs/footsteps/taps. "stop"
-        # and "halt" and "freeze" are the only 1-word commands we honour.
-        tokens = stripped.split()
-        if len(tokens) == 1:
-            one_word_allowed = {"stop", "halt", "freeze", "hello", "hey",
-                                "hi", "sonny", "sleep", "dance", "patrol",
-                                "selfie"}
-            if tokens[0] not in one_word_allowed:
-                logger.debug(f"[Voice] Dropped 1-word non-command: '{text}'")
-                return
-
-        # Self-speech suppression: if the speaker just said this out loud,
-        # the mic is hearing its own echo. Drop it. "stop" and wake words
-        # bypass this so the user can still interrupt the robot.
-        if self._speaker and self._speaker.was_recently_said(text):
-            lower = text.lower()
-            is_interrupt = any(w in lower for w in ("stop", "halt", "freeze"))
-            is_wake = any(w in lower for w in ("hello sonny", "hey sonny", "hi sonny"))
-            if not (is_interrupt or is_wake):
-                logger.debug(f"[Voice] Dropped self-echo: '{text}'")
-                print(f"[Voice] (self-echo dropped): '{text}'")
-                return
 
         # Filter out long sentences — commands are max ~6 words
         # Background conversation like "i was taking all three by the next one" is not a command
