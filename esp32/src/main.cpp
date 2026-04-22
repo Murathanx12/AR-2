@@ -35,15 +35,16 @@
 const int irPins[5] = {IR_W_PIN, IR_NW_PIN, IR_N_PIN, IR_NE_PIN, IR_E_PIN};
 
 // ---------------- Ultrasonic sensors (3x HC-SR04) — R4 obstacle detection --
-#define TRIG_L_PIN 8    // GPIO8  — left trigger
-#define ECHO_L_PIN 9    // GPIO9  — left echo (voltage divider!)
-#define TRIG_C_PIN 4    // GPIO4  — center trigger (original)
-#define ECHO_C_PIN 2    // GPIO2  — center echo (voltage divider!)
-#define TRIG_R_PIN 18   // GPIO18 — right trigger
-#define ECHO_R_PIN 1    // GPIO1  — right echo (voltage divider!)
+#define TRIG_L_PIN 19   // GPIO19 — left trigger
+#define ECHO_L_PIN 20   // GPIO20 — left echo (voltage divider!)
+#define TRIG_C_PIN 1    // GPIO1  — center trigger
+#define ECHO_C_PIN 18   // GPIO18 — center echo (voltage divider!)
+#define TRIG_R_PIN 4    // GPIO4  — right trigger
+#define ECHO_R_PIN 48   // GPIO48 — right echo (voltage divider!) ⚠ shared with NeoPixel!
 
 // ---------------- NeoPixel LEDs — R5 intention indicators ------------------
-#define NEOPIXEL_PIN 48   // GPIO48 — data line
+// ⚠ GPIO48 is now used by right ultrasonic echo — NeoPixel needs a new pin!
+#define NEOPIXEL_PIN 48   // GPIO48 — CONFLICT: reassign if using both
 #define NUM_LEDS     4    // Number of NeoPixel LEDs
 
 Adafruit_NeoPixel strip(NUM_LEDS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);

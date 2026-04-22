@@ -66,9 +66,9 @@ class UltrasonicConfig:
     """3x Ultrasonic sensors (HC-SR04) — R4 obstacle detection."""
     threshold_cm: float = 20.0  # obstacle detection threshold
     # ESP32 GPIO pins (for reference only — firmware handles hardware)
-    pins_left: Tuple[int, int] = (8, 9)      # trig, echo
-    pins_center: Tuple[int, int] = (4, 2)    # trig, echo
-    pins_right: Tuple[int, int] = (18, 1)    # trig, echo
+    pins_left: Tuple[int, int] = (19, 20)    # trig, echo
+    pins_center: Tuple[int, int] = (1, 18)   # trig, echo
+    pins_right: Tuple[int, int] = (4, 48)    # trig, echo
 
 
 @dataclass(frozen=True)

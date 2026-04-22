@@ -29,10 +29,11 @@ UART2 to Raspberry Pi (3 wires)
 
 ULTRASONIC 3x HC-SR04 (6 pins)
 ────────────────────────────────
-  Left sensor:    Trig GPIO 8,  Echo GPIO 9   (angled 30° left)
-  Center sensor:  Trig GPIO 4,  Echo GPIO 2   (forward)
-  Right sensor:   Trig GPIO 18, Echo GPIO 1   (angled 30° right)
+  Left sensor:    Trig GPIO 19, Echo GPIO 20  (angled 30° left)
+  Center sensor:  Trig GPIO 1,  Echo GPIO 18  (forward)
+  Right sensor:   Trig GPIO 4,  Echo GPIO 48  (angled 30° right)
   ⚠ ALL Echo pins need 5V→3.3V voltage divider (1kΩ + 2kΩ)!
+  ⚠ GPIO48 shared with NeoPixel — cannot use both simultaneously!
 
 NEOPIXEL LEDs (1 pin)
 ─────────────────────
