@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
-#include <Adafruit_NeoPixel.h>
 #include <stdio.h>
 
 // ---------------- Motor pin definitions (ORIGINAL — DO NOT CHANGE) --------
@@ -41,19 +40,6 @@ const int irPins[5] = {IR_W_PIN, IR_NW_PIN, IR_N_PIN, IR_NE_PIN, IR_E_PIN};
 #define ECHO_C_PIN 18   // GPIO18 — center echo (voltage divider!)
 #define TRIG_R_PIN 4    // GPIO4  — right trigger
 #define ECHO_R_PIN 48   // GPIO48 — right echo (voltage divider!) ⚠ shared with NeoPixel!
-
-// ---------------- NeoPixel LEDs — R5 intention indicators ------------------
-// ⚠ GPIO48 is now used by right ultrasonic echo — NeoPixel needs a new pin!
-#define NEOPIXEL_PIN 48   // GPIO48 — CONFLICT: reassign if using both
-#define NUM_LEDS     4    // Number of NeoPixel LEDs
-
-Adafruit_NeoPixel strip(NUM_LEDS, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
-
-// LED animation state
-uint8_t led_pattern = 0;  // 0=solid, 1=pulse, 2=rainbow, 3=blink, 4=breathe
-uint8_t led_r = 0, led_g = 0, led_b = 0;
-unsigned long lastLedUpdate = 0;
-const unsigned long LED_UPDATE_INTERVAL = 30; // ms
 
 // ---------------- Buzzer — R5 audio indicator ------------------------------
 #define BUZZER_PIN 46  // GPIO46
@@ -358,73 +344,6 @@ float readUltrasonicSingle(int trigPin, int echoPin)
 }
 
 // ============================================================
-// NeoPixel LED control — R5 intention indicators
-// ============================================================
-void setLedSolid(uint8_t r, uint8_t g, uint8_t b)
-{
-  for (int i = 0; i < NUM_LEDS; i++) {
-    strip.setPixelColor(i, strip.Color(r, g, b));
-  }
-  strip.show();
-}
-
-void updateLedAnimation()
-{
-  unsigned long now = millis();
-  if (now - lastLedUpdate < LED_UPDATE_INTERVAL) return;
-  lastLedUpdate = now;
-
-  switch (led_pattern) {
-    case 0: // solid — already set
-      break;
-    case 1: { // pulse
-      uint8_t brightness = (uint8_t)(128 + 127 * sin(now / 500.0 * 3.14159));
-      for (int i = 0; i < NUM_LEDS; i++) {
-        strip.setPixelColor(i, strip.Color(
-          led_r * brightness / 255,
-          led_g * brightness / 255,
-          led_b * brightness / 255
-        ));
-      }
-      strip.show();
-      break;
-    }
-    case 2: { // rainbow
-      uint16_t hue = (now / 10) % 65536;
-      for (int i = 0; i < NUM_LEDS; i++) {
-        strip.setPixelColor(i, strip.gamma32(
-          strip.ColorHSV(hue + (i * 65536 / NUM_LEDS))
-        ));
-      }
-      strip.show();
-      break;
-    }
-    case 3: { // blink
-      bool on = (now / 500) % 2 == 0;
-      if (on) {
-        setLedSolid(led_r, led_g, led_b);
-      } else {
-        setLedSolid(0, 0, 0);
-      }
-      break;
-    }
-    case 4: { // breathe
-      float t = (now % 3000) / 3000.0;
-      uint8_t brightness = (uint8_t)(255 * (t < 0.5 ? t * 2 : (1.0 - t) * 2));
-      for (int i = 0; i < NUM_LEDS; i++) {
-        strip.setPixelColor(i, strip.Color(
-          led_r * brightness / 255,
-          led_g * brightness / 255,
-          led_b * brightness / 255
-        ));
-      }
-      strip.show();
-      break;
-    }
-  }
-}
-
-// ============================================================
 // Mecanum vector drive (inverse kinematics)
 // ============================================================
 
@@ -536,23 +455,6 @@ void handleCommand(const String& commandName, const String& paramsStr)
   } else if (commandName == "stop") {
     STOP();
   }
-  // --- R5 LED commands ---
-  else if (commandName == "led") {
-    // Format: led:r,g,b
-    int c1 = paramsStr.indexOf(',');
-    int c2 = paramsStr.indexOf(',', c1 + 1);
-    if (c1 != -1 && c2 != -1) {
-      led_r = paramsStr.substring(0, c1).toInt();
-      led_g = paramsStr.substring(c1 + 1, c2).toInt();
-      led_b = paramsStr.substring(c2 + 1).toInt();
-      led_pattern = 0; // solid mode
-      setLedSolid(led_r, led_g, led_b);
-    }
-  }
-  else if (commandName == "led_pattern") {
-    // Format: led_pattern:id
-    led_pattern = paramsStr.toInt();
-  }
   // --- R5 Buzzer command ---
   else if (commandName == "buzzer") {
     // Format: buzzer:freq,duration_ms
@@ -592,25 +494,16 @@ void setup()
   pinMode(TRIG_R_PIN, OUTPUT);
   pinMode(ECHO_R_PIN, INPUT);
 
-  // NeoPixel LEDs
-  strip.begin();
-  strip.setBrightness(80);  // 0-255, keep moderate to save power
-  strip.show();  // all off
-
   // Buzzer
   pinMode(BUZZER_PIN, OUTPUT);
 
   SERIAL.println("ESP32 V4 booting...");
   SERIAL.println("UART2 on GPIO16(RX)/GPIO17(TX) at 115200");
 
-  uart2.println("ESP32 Ready (V4 with 3x ultrasonic + LED + buzzer)");
+  uart2.println("ESP32 Ready (V4 with 3x ultrasonic + buzzer)");
   SERIAL.println("ESP32 Ready — sent hello on UART2");
   IO_init();
 
-  // Startup indicator: flash blue
-  setLedSolid(0, 0, 255);
-  delay(500);
-  setLedSolid(0, 0, 0);
   SERIAL.println("Setup complete. Entering main loop.");
 }
 
@@ -660,9 +553,6 @@ void loop()
     if (distR >= 0) { uart2.print("DIST_R:"); uart2.println(distR, 1); }
     lastDistSend = now;
   }
-
-  // --- Update LED animation ---
-  updateLedAnimation();
 
   // --- Stop buzzer when duration elapsed ---
   if (buzzerEndTime > 0 && now >= buzzerEndTime) {

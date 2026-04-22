@@ -33,11 +33,7 @@ ULTRASONIC 3x HC-SR04 (6 pins)
   Center sensor:  Trig GPIO 1,  Echo GPIO 18  (forward)
   Right sensor:   Trig GPIO 4,  Echo GPIO 48  (angled 30° right)
   ⚠ ALL Echo pins need 5V→3.3V voltage divider (1kΩ + 2kΩ)!
-  ⚠ GPIO48 shared with NeoPixel — cannot use both simultaneously!
-
-NEOPIXEL LEDs (1 pin)
-─────────────────────
-  Data:  GPIO 48   (WS2812B, 4 LEDs)
+  (GPIO48 was formerly NeoPixel — now repurposed for right ultrasonic echo)
 
 BUZZER (1 pin)
 ──────────────
