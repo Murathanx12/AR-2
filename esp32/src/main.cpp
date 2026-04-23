@@ -41,8 +41,14 @@ const int irPins[5] = {IR_W_PIN, IR_NW_PIN, IR_N_PIN, IR_NE_PIN, IR_E_PIN};
 //
 // GPIO 18 and GPIO 1 are now used for servo outputs (see servo section
 // below), NOT ultrasonic.
-#define TRIG_C_PIN 39   // GPIO39 — center trigger (via shifter B1)
-#define ECHO_C_PIN 40   // GPIO40 — center echo    (via shifter B0)
+// Default pin assignments. The orientation (which wire is TRIG, which
+// is ECHO) can be swapped at runtime via the UART command `ultra_swap`
+// without reflashing — useful when we don't know how the physical wires
+// are plugged into the shifter.
+#define TRIG_C_PIN_DEFAULT 39
+#define ECHO_C_PIN_DEFAULT 40
+int trigPin = TRIG_C_PIN_DEFAULT;
+int echoPin = ECHO_C_PIN_DEFAULT;
 
 // ---------------- Buzzer — R5 audio indicator ------------------------------
 #define BUZZER_PIN 46  // GPIO46
@@ -469,6 +475,39 @@ void handleCommand(const String& commandName, const String& paramsStr)
       buzzerEndTime = millis() + dur;
     }
   }
+  // --- Ultrasonic pin swap (no-arg) -----------------------------------
+  // Swap the current TRIG and ECHO pins. Lets us flip the orientation
+  // without reflashing when the physical wires are plugged in backward.
+  else if (commandName == "ultra_swap") {
+    int tmp = trigPin;
+    trigPin = echoPin;
+    echoPin = tmp;
+    pinMode(trigPin, OUTPUT);
+    pinMode(echoPin, INPUT);
+    uart2.print("ULTRA: swapped  trig=GPIO");
+    uart2.print(trigPin);
+    uart2.print("  echo=GPIO");
+    uart2.println(echoPin);
+  }
+  // --- Ultrasonic pin set (explicit) ----------------------------------
+  // Format: ultra_pins:trig,echo   (e.g. ultra_pins:39,40)
+  else if (commandName == "ultra_pins") {
+    int ci = paramsStr.indexOf(',');
+    if (ci != -1) {
+      int t = paramsStr.substring(0, ci).toInt();
+      int e = paramsStr.substring(ci + 1).toInt();
+      if (t > 0 && e > 0 && t != e) {
+        trigPin = t;
+        echoPin = e;
+        pinMode(trigPin, OUTPUT);
+        pinMode(echoPin, INPUT);
+        uart2.print("ULTRA: set  trig=GPIO");
+        uart2.print(trigPin);
+        uart2.print("  echo=GPIO");
+        uart2.println(echoPin);
+      }
+    }
+  }
   else {
     SERIAL.println("Unknown command");
   }
@@ -493,17 +532,24 @@ void setup()
   // (Left + Right are wired in firmware but the physical pins are
   // unconnected; reads on those pins are skipped to save the 60 ms of
   // pulseIn timeout per cycle that two missing sensors would cost.)
-  pinMode(TRIG_C_PIN, OUTPUT);
-  pinMode(ECHO_C_PIN, INPUT);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
 
   // Buzzer
   pinMode(BUZZER_PIN, OUTPUT);
 
-  SERIAL.println("ESP32 V4.3 booting...");
+  SERIAL.println("ESP32 V4.4 booting...");
   SERIAL.println("UART2 on GPIO16(RX)/GPIO17(TX) at 115200");
-  SERIAL.println("Ultrasonic: TRIG=GPIO39 ECHO=GPIO40");
+  SERIAL.print("Ultrasonic: TRIG=GPIO");
+  SERIAL.print(trigPin);
+  SERIAL.print(" ECHO=GPIO");
+  SERIAL.println(echoPin);
 
-  uart2.println("ESP32 Ready (V4.3 — ultrasonic TRIG=39 ECHO=40)");
+  uart2.print("ESP32 Ready (V4.4 — ultrasonic TRIG=");
+  uart2.print(trigPin);
+  uart2.print(" ECHO=");
+  uart2.print(echoPin);
+  uart2.println(", `ultra_swap` to flip)");
   SERIAL.println("ESP32 Ready — sent hello on UART2");
   IO_init();
 
@@ -547,7 +593,7 @@ void loop()
   // print the value (even on timeout = -1.0) so the Pi can see the
   // sensor is being read; -1.0 means "no echo within 30 ms".
   if (now - lastDistSend >= DIST_SEND_INTERVAL) {
-    float distC = readUltrasonicSingle(TRIG_C_PIN, ECHO_C_PIN);
+    float distC = readUltrasonicSingle(trigPin, echoPin);
     uart2.print("DIST_C:"); uart2.println(distC, 1);
     lastDistSend = now;
   }
