@@ -1382,17 +1382,23 @@ class AlfredFSM:
         self.line_follower.debug_omega = int(omega)
 
     def _tick_blocked(self):
-        """Stop and wait for obstacle to clear (R4).
+        """Stop, announce, then flow into REROUTING (R4).
 
-        Checks ultrasonic to decide when to resume. Camera contour false-
-        positives easily, so it's only used as a tiebreaker now.
-        Minimum 0.4 s dwell so we don't flicker BLOCKED<->APPROACH on a
-        single noisy frame, but quick to resume once US shows clear (per
-        user spec 2026-04-23 ~20:32 — "if you are not moving and stuck
-        on obstacle where the sensor is not picking anything continue
-        task"). 6 s hard timeout — if the obstacle is never cleared we
-        bail to IDLE and prompt for the next command rather than stay
-        frozen here forever.
+        User spec (2026-04-23 ~20:39):
+            * "before moving wait. say that you are blocked, then say
+               rerouting"
+            * "rotate till the sensor doesn't see distance + 2 more
+               second of turning"  (turn_away buffer = 2 s, set elsewhere)
+            * "then move forward for 3 seconds, stop if sensor reads
+               anything"  (drive_around = 3 s with US safety)
+            * "then start the find qr code phase again"  (REROUTING
+               turn_back hands off to ARUCO_SEARCH)
+
+        So BLOCKED is now a *transient* announcement state — wait 0.5 s
+        for the spoken "I am blocked" to land, then say "Rerouting" and
+        transition into REROUTING which does the rotate-drive-search.
+        Stays in BLOCKED if the previous state isn't an ArUco one (no
+        marker context to reroute toward — fall back to old behaviour).
         """
         self.uart.send(cmd_stop())
         self.line_follower.debug_vx = 0
@@ -1402,30 +1408,43 @@ class AlfredFSM:
         now = time.monotonic()
         if self._blocked_entry_time is None:
             self._blocked_entry_time = now
+            if self.speaker:
+                self.speaker.say("I am blocked.")
+            print(f"[BLOCKED] entered (prev={STATE_NAMES.get(self._previous_state, '?')})")
 
         elapsed = now - self._blocked_entry_time
-        if elapsed < 0.4:
+
+        # Hand off to REROUTING after the announcement clears, but only
+        # if we have an ArUco context to reroute toward. Other previous
+        # states (FOLLOWING, etc.) keep the old wait-and-resume policy.
+        prev_is_aruco = self._previous_state in (
+            State.ARUCO_APPROACH, State.ARUCO_SEARCH
+        )
+        if prev_is_aruco and elapsed > 0.5:
+            print("[BLOCKED] handing off to REROUTING")
+            if self.speaker:
+                self.speaker.say("Rerouting.")
+            self._blocked_entry_time = None
+            self._reset_reroute()
+            self._reroute_from = State.ARUCO_APPROACH
+            self.transition(State.REROUTING)
             return
 
+        # Non-ArUco fallback: wait for sensors to clear, with 6 s hard
+        # timeout so we don't sit forever on a flickered camera contour.
+        if elapsed < 0.4:
+            return
         ultrasonic_clear = not self._check_ultrasonic_obstacle()
-
         if elapsed > 6.0 and ultrasonic_clear:
-            # Sensor sees nothing close; the original camera trigger may
-            # have been a flicker. Resume the task instead of sitting.
             print(f"[BLOCKED] timeout {elapsed:.1f}s, US clear — resuming")
             self._blocked_entry_time = None
             if self._previous_state in (State.FOLLOWING, State.ENDPOINT, State.PARKING,
                                          State.LOST_REVERSE, State.LOST_PIVOT):
                 self.line_follower.reset()
                 self.transition(State.FOLLOWING)
-            elif self._previous_state == State.ARUCO_APPROACH:
-                self.transition(State.ARUCO_APPROACH)
-            elif self._previous_state == State.ARUCO_SEARCH:
-                self.transition(State.ARUCO_SEARCH)
             else:
                 self.transition(State.IDLE)
             return
-
         camera_clear = not self._check_camera_obstacle()
 
         if ultrasonic_clear and camera_clear:
@@ -1616,7 +1635,7 @@ class AlfredFSM:
                 if self._reroute_clear_count == 0:
                     self._reroute_clear_count = 1
                     self._reroute_us_clear_since = now
-                if now - self._reroute_us_clear_since >= 0.5:
+                if now - self._reroute_us_clear_since >= 2.0:
                     self._reroute_phase = "drive_around"
                     self._reroute_phase_start = now
                     self._reroute_clear_count = 0
@@ -1662,7 +1681,7 @@ class AlfredFSM:
         # Ultrasonic safety overrides the timer — if something appears
         # within slow_cm during the drive, abort to turn_away with a fresh
         # side choice rather than ramming it.
-        DRIVE_AROUND_SECONDS = 2.5
+        DRIVE_AROUND_SECONDS = 3.0
         if self._reroute_phase == "drive_around":
             us_cm_now = self.uart.get_distance() if not self.no_ultrasonic else -1.0
             us_unsafe = (

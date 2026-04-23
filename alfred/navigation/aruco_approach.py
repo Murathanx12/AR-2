@@ -76,17 +76,17 @@ class ArucoApproach:
         return (self.PHYSICAL_MARKER_M * focal_px) / pixel_size
 
     def _forward_speed(self, dist_m):
-        """Quadratic ramp — vx = 45·dist², clamped [8, 40].
+        """Quadratic ramp — vx = 35·dist², clamped [8, 30].
 
-        Top speed 40 per user spec (2026-04-23 ~20:32 — "set the normal
-        speed to 40"). Quadratic shape keeps the deceleration smooth as
-        we approach: 1.0 m → 40, 0.8 m → 28, 0.6 m → 16, 0.5 m → 11,
-        0.4 m → 8 (floor). Combined with the controller-side
-        `min(camera_vx, us_vx)` rule, whichever sensor sees closer
-        governs.
+        Reverted to the version the user confirmed worked well
+        (2026-04-23 ~20:48 — "2 iterations ago it was very good when
+        the speed was set to 30, set that again"). Top speed 30 keeps
+        the approach gentle and gives the centring + arrival debounce
+        plenty of time to settle before the marker stand. Profile:
+        1.0 m → 30, 0.8 m → 22, 0.6 m → 12, 0.5 m → 8, 0.4 m → 8.
         """
-        vx = int(45 * dist_m * dist_m)
-        return max(8, min(40, vx))
+        vx = int(35 * dist_m * dist_m)
+        return max(8, min(30, vx))
 
     def compute_visual_approach(self, marker, frame_width, frame_height,
                                  us_in_stop_zone: bool = False):
@@ -209,21 +209,20 @@ class ArucoApproach:
             )
             self._stop_band_since = None
 
-        # === PHASE 1: COARSE CENTRING (mecanum diagonal) ===
-        # Big bearing error → use BOTH omega (rotate camera onto marker)
-        # AND vy (strafe body toward marker) at once. Mecanum can do both
-        # in the same tick. No forward motion until the marker is roughly
-        # framed — otherwise we drive past while still trying to face it.
+        # === PHASE 1: CENTRE FIRST (rotate-only when off-centre) ===
+        # Reverted to the version the user said worked best (2026-04-23
+        # ~20:48). The diagonal-approach attempt swung past centre too
+        # often; pure rotation when off-centre is more stable because the
+        # body doesn't translate while we're still figuring out the
+        # marker position.
         if abs(error_x) > self.CENTER_TOLERANCE:
-            omega = int(40 * error_x)
-            omega = max(-45, min(45, omega))
-            vy = int(25 * error_x)
-            vy = max(-30, min(30, vy))
+            omega = int(35 * error_x)
+            omega = max(-40, min(40, omega))
             log_event(
-                f"ARUCO: coarse centring (err={error_x:+.2f}, "
-                f"vy={vy}, omega={omega})"
+                f"ARUCO: centring (err={error_x:+.2f}, omega={omega}) — "
+                f"rotate first, approach after"
             )
-            return (0, vy, omega)
+            return (0, 0, omega)
 
         # === PHASE 2: APPROACH with strong perspective + cx strafe ===
         # Robotics-engineer reasoning (per user feedback 2026-04-23 ~20:23):
@@ -255,18 +254,19 @@ class ArucoApproach:
         except Exception:
             skew = 0.0
 
-        proximity_factor = max(0.6, min(1.5, 2.0 - dist_m))
-        vy_cx = int(20 * error_x)
-        vy_persp = int(45 * skew * proximity_factor)
-        vy = vy_cx + vy_persp
-        vy = max(-40, min(40, vy))               # strafe cap > forward cap
+        # Small perspective-only strafe — keeps body on the marker's
+        # normal axis without fighting the cx error (which is 0 here
+        # because we already centred in Phase 1). Cap small (15) so we
+        # don't oscillate.
+        vy_persp = int(20 * skew)
+        vy_persp = max(-15, min(15, vy_persp))
 
         speed = self._forward_speed(dist_m)
         log_event(
-            f"ARUCO: approaching (vx={speed}, vy={vy}, "
-            f"dist={dist_m:.2f}m, skew={skew:+.2f}, prox={proximity_factor:.2f})"
+            f"ARUCO: approaching (vx={speed}, vy_persp={vy_persp}, "
+            f"dist={dist_m:.2f}m, skew={skew:+.2f})"
         )
-        return (speed, vy, 0)
+        return (speed, vy_persp, 0)
 
     def is_holding(self):
         """Whether we've arrived and are maintaining distance."""
