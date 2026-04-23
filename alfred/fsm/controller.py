@@ -891,7 +891,7 @@ class AlfredFSM:
                         f"approaching it. I will stop about twenty "
                         f"centimetres in front.")
             return ("I have found a marker and I am approaching it. "
-                    "I will stop about twenty centimetres in front.")
+                    "I will stop about thirty centimetres in front.")
 
         if st == State.BLOCKED:
             return ("There is an obstacle in front of me. I am waiting "

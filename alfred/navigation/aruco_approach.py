@@ -39,13 +39,16 @@ class ArucoApproach:
     PHYSICAL_MARKER_M = 0.18     # 18 cm printed tag (measured)
     FOCAL_RATIO = 0.413          # calibrated 2026-04-23 at 1920x1080: 476 px @ 30 cm
 
-    # Target stop distance ≈ 20 cm with a small dead band so the robot doesn't
-    # oscillate forward/back around the set point. Ultrasonic will refine this
-    # once wired up.
-    STOP_DIST_M = 0.20
-    HOLD_NEAR_M = 0.15           # closer than this → back up
-    HOLD_FAR_M  = 0.30           # farther than this while holding → nudge forward
-    APPROACH_REENGAGE_M = 0.35   # drifted past this → leave hold, re-approach
+    # Target stop distance 30 cm (user spec, 2026-04-23). Ultrasonic isn't
+    # reliably wired on this build, so the camera alone governs the stop —
+    # the hold band is set tight around the target so jitter doesn't cause
+    # oscillation. If the marker is moved toward or away from the robot,
+    # the hold logic backs up / nudges forward to return to the 30 cm set
+    # point.
+    STOP_DIST_M = 0.30           # stop target — user-specified 30 cm
+    HOLD_NEAR_M = 0.25           # closer than this → back up
+    HOLD_FAR_M  = 0.38           # farther than this while holding → nudge forward
+    APPROACH_REENGAGE_M = 0.45   # drifted past this → leave hold, re-approach
 
     CENTER_TOLERANCE = 0.08      # 8 % of frame width = "centered"
 
@@ -62,12 +65,13 @@ class ArucoApproach:
         return (self.PHYSICAL_MARKER_M * focal_px) / pixel_size
 
     def _forward_speed(self, dist_m):
-        """Ramp: fast when far, creep through the final 10 cm."""
+        """Ramp: fast when far, creep through the final ~15 cm before the
+        30 cm stop target so we don't overshoot into the hold band."""
         if dist_m > 1.0:
             return 40
-        if dist_m > 0.5:
+        if dist_m > 0.60:
             return 30
-        if dist_m > 0.30:
+        if dist_m > 0.45:
             return 20
         return 14
 

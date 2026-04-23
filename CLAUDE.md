@@ -53,7 +53,11 @@ Camera (2026-04-23, measured):
 ArUco geometry (2026-04-23, calibrated against actual printed marker):
 - Printed marker size: **18 cm** (`PHYSICAL_MARKER_M = 0.18`).
 - `FOCAL_RATIO = 0.413` at 1920×1080 — calibrated against a 30 cm reading that came
-  out at 476 px side length. Stop target 20 cm, hold band 15–30 cm.
+  out at 476 px side length.
+- **Stop target: 30 cm** (user spec, no ultrasonic on this build so camera alone
+  governs the stop). Hold band 25–38 cm; robot backs up if marker gets closer than
+  25 cm, nudges forward if it drifts past 38 cm. Re-engages approach if the marker
+  moves past 45 cm.
 
 Photo gallery:
 - Robot saves photos to `photos/photo_YYYYMMDD_HHMMSS.jpg`.
