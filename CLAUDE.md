@@ -14,8 +14,18 @@ test plan.
 Remaining hardware checks (not code issues):
 1. ESP32 motors — UART connects but motors pending physical verification. Run
    scripts/test_esp32.py before demo. Camera/voice/vision all function without motors.
-2. Ultrasonic sensors (HC-SR04 × 3) — not currently wired. `--no-ultrasonic`
-   flag is the default path; camera-based YOLO + contour detection handles R4.
+2. Ultrasonic sensor (HC-SR04 × 1, centre only) — **wired and working as of
+   2026-04-23**: TRIG=GPIO8, ECHO=GPIO9 via fresh bidirectional level
+   shifter (the GPIO39/40 wiring was retired after a level-shifter fault).
+   ESP32 firmware default (V4.5+) targets these pins; runtime override via
+   `ultra_pins:t,e` UART command. Approach controller adds two debounced
+   behaviours on top of the existing `< 20 cm BLOCKED` emergency:
+   * Slow: centre US `< 50 cm` for ≥3 ticks → halve forward vx
+   * Reroute: centre US `< 30 cm` for ≥6 ticks AND camera-marker distance
+     exceeds US by ≥10 cm (i.e. something *between* robot and tag) →
+     `ARUCO_APPROACH → REROUTING`. Left/right HC-SR04s remain unwired; the
+     reroute side-choice already works single-sensor (camera bbox + tag
+     bearing memory).
 3. MediaPipe — optional. Install with `pip install mediapipe` for gesture EC1.
 4. USB hub — camera and mic must go directly into Pi USB ports, not the hub.
 5. VPN — run `sudo openvpn --config /etc/openvpn/windscribe.conf --daemon`
@@ -54,10 +64,17 @@ ArUco geometry (2026-04-23, calibrated against actual printed marker):
 - Printed marker size: **18 cm** (`PHYSICAL_MARKER_M = 0.18`).
 - `FOCAL_RATIO = 0.413` at 1920×1080 — calibrated against a 30 cm reading that came
   out at 476 px side length.
-- **Stop target: 30 cm** (user spec, no ultrasonic on this build so camera alone
-  governs the stop). Hold band 25–38 cm; robot backs up if marker gets closer than
-  25 cm, nudges forward if it drifts past 38 cm. Re-engages approach if the marker
-  moves past 45 cm.
+- **Stop target: 30 cm** (user spec). Camera distance is authoritative for
+  the stop; ultrasonic only shapes speed and triggers reroute. Hold band
+  25–38 cm; robot backs up if marker gets closer than 25 cm, nudges forward
+  if it drifts past 38 cm. Re-engages approach if the marker moves past
+  45 cm.
+- **Arrival debounce: 3 s of in-band + centred frames** before hold mode
+  latches (`ArucoApproach.STOP_HOLD_SECONDS`). The robot stops at 30 cm,
+  then must hold within the band and centred for 3 s before the buzzer +
+  arrival announcement fire. Any deviation (jitter, slight off-centre, or
+  the marker moving) resets the timer. This prevents single-frame stops
+  from declaring arrival prematurely.
 
 Photo gallery:
 - Robot saves photos to `photos/photo_YYYYMMDD_HHMMSS.jpg`.
@@ -120,7 +137,7 @@ Purchased (additional):
 On-robot peripherals:
 - PCA9685 16-channel servo controller — head tilt (ch0) + left arm (ch1-2) + right arm (ch3-4)
 - Piezo buzzer (GPIO46)
-- 1x HC-SR04 ultrasonic — CENTER ONLY on this build (GPIO18 trig, GPIO1 echo via 5V→3.3V level shifter). Left/right physical sensors not wired. Firmware reads center-only and emits `DIST_C:` at 10 Hz.
+- 1x HC-SR04 ultrasonic — CENTER ONLY on this build. **TRIG=GPIO8, ECHO=GPIO9** via bidirectional level shifter (validated 2026-04-23). Left/right physical sensors not wired. Firmware reads center-only and emits `DIST_C:` at 10 Hz.
 - 5x TCRT5000 IR line sensors (GPIO 5,6,7,15,45)
 
 Servo Arm Layout (PCA9685):

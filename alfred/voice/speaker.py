@@ -136,7 +136,10 @@ class Speaker:
         norm = self._normalize_for_match(actual_text)
         if norm:
             with self._recent_lock:
-                self._recent_utterances.append((norm, _t.monotonic() + 6.0))
+                # 15 s expiry covers piper TTS playback (up to ~5 s for
+                # long phrases) + transcription latency (~2 s) + safety
+                # margin. Earlier 6 s window let mishearings slip through.
+                self._recent_utterances.append((norm, _t.monotonic() + 15.0))
                 # Cap to 6 most recent to keep comparison cheap.
                 if len(self._recent_utterances) > 6:
                     self._recent_utterances.pop(0)

@@ -284,7 +284,12 @@ class AlfredFSM:
         # frames before falling back to SEARCH. One dropped detection at 22fps
         # is not a lost marker.
         self._aruco_lost_frames = 0
-        self.ARUCO_LOST_FRAMES_THRESHOLD = 5
+        # 15 frames @ 14 fps ≈ 1 s. The earlier value of 5 (~350 ms) caused
+        # APPR↔SRCH ping-pong whenever the robot rotated/strafed in the
+        # stop band: one motion-blur frame + lose tag → SEARCH → re-find
+        # → APPR. 1 s is long enough to absorb the manoeuvre, short enough
+        # to recover quickly when the marker is genuinely gone.
+        self.ARUCO_LOST_FRAMES_THRESHOLD = 15
 
         # Per-state context
         self._dance_start = None
@@ -330,6 +335,20 @@ class AlfredFSM:
         self._reroute_omega_sign = 0    # -1 = first rotate left, +1 = first rotate right
         self._reroute_clear_count = 0
         self._reroute_from = None       # state to return to once path clears
+
+        # Ultrasonic-driven approach behaviour. `_us_slow_count` ticks while
+        # the centre HC-SR04 is below `slow_cm`; once it exceeds `slow_debounce`,
+        # the approach speed is halved. `_us_reroute_count` ticks while a real
+        # obstacle (US distinctly closer than the camera-marker distance)
+        # persists; once it exceeds `reroute_debounce`, we hop into REROUTING.
+        # `_us_stop_count` ticks while US says we're in stop-zone range (≤
+        # stop_cm with marker visible); once it exceeds `stop_debounce`, we
+        # tell ArucoApproach we're in band even if camera-distance hasn't
+        # crossed STOP_DIST_M yet — gives the user-requested ultrasonic stop.
+        # All three counters reset to zero on the first tick the condition fails.
+        self._us_slow_count = 0
+        self._us_reroute_count = 0
+        self._us_stop_count = 0
 
         # Dispatch table
         self._tick_dispatch = {
@@ -628,6 +647,32 @@ class AlfredFSM:
         self._reroute_clear_count = 0
         self._reroute_from = None
 
+    def _reroute_path_clear(self) -> bool:
+        """Is the forward path clear during a reroute manoeuvre?
+
+        Used by the `curve` and `drive_around` phases to decide whether to
+        commit to forward motion. Combines the camera contour/YOLO check
+        with the centre ultrasonic so a known-bad contour fallback (which
+        false-positives on shadows / the marker stand) doesn't stall the
+        manoeuvre when the sensor confirms there's nothing in front.
+
+        Truth table when both signals are available:
+            US clear (>slow_cm or no echo) → CLEAR (overrides camera flicker)
+            US silent / not wired          → trust camera
+            US close + camera clear        → blocked (trust the sensor)
+            US close + camera blocked      → blocked
+        """
+        cam_blocked = self._check_camera_obstacle()
+        if self.no_ultrasonic:
+            return not cam_blocked
+        us_cm = self.uart.get_distance()
+        us_cfg = self.config.ultrasonic
+        # Negative dist = no echo (nothing within range = clear).
+        us_clear = us_cm < 0 or us_cm > us_cfg.slow_cm
+        if us_clear:
+            return True
+        return not cam_blocked
+
     def tick(self):
         """Run one FSM cycle: read sensors, dispatch state handler, update expression."""
         # Read camera frame (shared across states)
@@ -677,12 +722,17 @@ class AlfredFSM:
             # Just wake up directly — don't ask confirmation
             return
 
-        # Fast path: literal stop keywords skip the GPT-4o-mini round trip
-        # entirely so "stop" acts within ~300 ms (VAD silence) instead of
-        # ~800 ms. The listener already forwards exactly "stop" for any of
-        # {stop, halt, freeze}, so this match is safe.
+        # Fast path: any of these tokens anywhere in the heard utterance
+        # snaps to stop intent and skips the GPT-4o-mini round trip
+        # (~300 ms instead of ~800 ms). Substring match — so "Sonny stop",
+        # "stop the robot", "please stop now", "halt!", "freeze" all hit.
+        # The cost of a false positive is just an unnecessary stop, which
+        # the user can always override with the next command. The cost of
+        # a missed stop is collisions, so we lean permissive here.
         stripped = text.strip().lower().rstrip(".!,?")
-        if stripped in ("stop", "halt", "freeze"):
+        STOP_TOKENS = ("stop", "halt", "freeze", "abort", "cancel", "wait")
+        words = stripped.split()
+        if any(tok in words for tok in STOP_TOKENS):
             intent, confidence = "stop", 1.0
         else:
             intent, confidence = self.intent_classifier.classify(text)
@@ -703,7 +753,13 @@ class AlfredFSM:
             self._aruco_target_id = None           # drop any marker chase
             self._aruco_announced_id = None
             self._aruco_lost_frames = 0
+            self._aruco_arrived_announced = False
             self._reset_reroute()
+            self._us_slow_count = 0
+            self._us_reroute_count = 0
+            self._us_stop_count = 0
+            if self.aruco_approach:
+                self.aruco_approach.reset()           # clears 3-s stop debounce
             if self.speaker:
                 self.speaker.stop()
                 self.speaker.say("stop")
@@ -838,6 +894,9 @@ class AlfredFSM:
                 self._aruco_last_frame_w = None
                 self._aruco_last_seen_time = None
                 self._reset_reroute()
+                self._us_slow_count = 0
+                self._us_reroute_count = 0
+                self._us_stop_count = 0
                 if self.aruco_approach:
                     self.aruco_approach.reset()
             elif target == State.PERSON_APPROACH:
@@ -1075,22 +1134,87 @@ class AlfredFSM:
             target_marker = max(markers, key=lambda m: m["size"])
             self._aruco_target_id = target_marker["id"]
 
-        # Ultrasonic as the authoritative distance sensor during final approach.
-        # Centre sensor < 20 cm + target visible = arrived (we're right in front
-        # of the tag). Same ultrasonic close + no target visible = obstacle.
+        # === Ultrasonic-driven obstacle handling (debounced) ==================
+        # The centre HC-SR04 (TRIG=GPIO8/ECHO=GPIO9, validated 2026-04-23) gives
+        # us a depth cue the camera can't: it sees objects between us and the
+        # marker. Two debounced behaviours:
+        #   (1) reroute_cm  — sustained reading distinctly closer than the
+        #                     camera-estimated marker distance → REROUTING.
+        #                     Margin guards against treating the marker stand
+        #                     itself as an obstacle.
+        #   (2) slow_cm     — sustained reading just close-ish → halve forward
+        #                     speed during the rest of this tick.
+        # Both counters reset on the first tick the condition fails, so a
+        # stray short read doesn't flick the FSM. They're zeroed again whenever
+        # a fresh "go to marker" command sets up the approach.
+        us_cfg = self.config.ultrasonic
+        us_cm = self.uart.get_distance() if not self.no_ultrasonic else -1.0
+        h_frame, w_frame = self._last_frame.shape[:2]
+        marker_cm = -1.0
+        if target_marker is not None and self.aruco_approach is not None:
+            marker_cm = self.aruco_approach._distance_m(
+                target_marker["size"], w_frame
+            ) * 100.0
+
+        real_obstacle = (
+            not self.no_ultrasonic
+            and target_marker is not None
+            and 0 < us_cm < us_cfg.reroute_cm
+            and marker_cm > us_cm + us_cfg.reroute_margin_cm
+        )
+        if real_obstacle:
+            self._us_reroute_count += 1
+        else:
+            self._us_reroute_count = 0
+        if self._us_reroute_count >= us_cfg.reroute_debounce:
+            print(f"[ArUco] US reroute: us={us_cm:.0f}cm, marker={marker_cm:.0f}cm")
+            if self.speaker:
+                self.speaker.say("Obstacle in the path. Going around.")
+            self._us_reroute_count = 0
+            self._us_slow_count = 0
+            self._reroute_from = State.ARUCO_APPROACH
+            self.uart.send(cmd_stop())
+            self.transition(State.REROUTING)
+            return
+
+        near_slow = (
+            not self.no_ultrasonic
+            and 0 < us_cm < us_cfg.slow_cm
+        )
+        if near_slow:
+            self._us_slow_count += 1
+        else:
+            self._us_slow_count = 0
+        slow_now = self._us_slow_count >= us_cfg.slow_debounce
+
+        # US-confirmed stop zone (parallel to camera STOP_DIST_M). Triggers
+        # when US <= stop_cm AND we still see the marker — that pair means
+        # we've physically reached the marker, even if camera distance is a
+        # few cm above its 40 cm threshold (which it can be at 1080p
+        # because pixel-size jitter is ±2-3 cm).
+        us_close_to_marker = (
+            not self.no_ultrasonic
+            and target_marker is not None
+            and 0 < us_cm <= us_cfg.stop_cm
+        )
+        if us_close_to_marker:
+            self._us_stop_count += 1
+        else:
+            self._us_stop_count = 0
+        us_in_stop_zone = self._us_stop_count >= us_cfg.stop_debounce
+
+        # ======================================================================
+        # Ultrasonic emergency: < threshold_cm (default 20). With target
+        # visible this is the safety net — just halt forward motion this
+        # tick. The camera 3-s debounce is the authoritative arrival
+        # mechanism (per the user spec, stops camera-driven at 40 cm), so we
+        # do NOT auto-flip _holding here — that would bypass the debounce
+        # and announce arrival on a single noisy frame. Without target it's
+        # a hard BLOCKED. Sits AFTER the reroute check so a real obstacle
+        # gets a chance to trigger reroute first.
         if self._check_ultrasonic_obstacle():
             if target_marker is not None:
-                # Ultrasonic confirms we're close — force hold mode
-                if self.aruco_approach and not self.aruco_approach.is_holding():
-                    self.aruco_approach._holding = True
-                if not self._aruco_arrived_announced:
-                    self._aruco_arrived_announced = True
-                    self._aruco_hold_start = time.monotonic()
-                    self.uart.send(cmd_stop())
-                    self.uart.send(cmd_buzzer(1200, 300))
-                    print(f">>> Holding at ArUco marker {self._aruco_target_id}")
-                    if self.speaker:
-                        self.speaker.say("I have arrived at the marker. Your delivery is ready.")
+                self.uart.send(cmd_stop())
                 return
             self.transition(State.BLOCKED)
             return
@@ -1121,8 +1245,28 @@ class AlfredFSM:
                 # See markers but not our target
                 seen = [m["id"] for m in markers]
                 print(f"[ArUco] See {seen}, want {self._aruco_target_id}")
-            # Genuinely lost — spin back to search.
+            # Genuinely lost. Two cases:
+            #   1. Lost AND ultrasonic shows an obstacle near (the tag is
+            #      hidden behind something) → run REROUTING to sidestep
+            #      and re-acquire. Reuses the rotate-drive-rotate sub-FSM:
+            #      turn_back already looks for the marker on the way back.
+            #   2. Just lost (line of sight clear, marker moved away) →
+            #      ARUCO_SEARCH spins toward the last-known bearing.
             self._aruco_lost_frames = 0
+            us_blocked = (
+                not self.no_ultrasonic
+                and 0 < us_cm < us_cfg.reroute_cm
+            )
+            if us_blocked:
+                print(f"[ArUco] Lost marker AND US={us_cm:.0f}cm — sidestepping via REROUTING")
+                if self.speaker:
+                    self.speaker.say("I lost the marker behind something. Stepping aside.")
+                self._us_reroute_count = 0
+                self._us_slow_count = 0
+                self._reroute_from = State.ARUCO_APPROACH
+                self.uart.send(cmd_stop())
+                self.transition(State.REROUTING)
+                return
             self.transition(State.ARUCO_SEARCH)
             return
 
@@ -1133,11 +1277,30 @@ class AlfredFSM:
         # recover without a blind spin.
         self._remember_marker(target_marker, self._last_frame)
 
-        # Visual approach
-        h, w = self._last_frame.shape[:2]
-        result = self.aruco_approach.compute_visual_approach(target_marker, w, h)
+        # Visual approach (reuse the frame size we already computed above).
+        # Pass `us_in_stop_zone` so the camera-driven 3 s arrival debounce
+        # also honours the centre ultrasonic — whichever sensor reports we
+        # are at the marker first wins the stop.
+        result = self.aruco_approach.compute_visual_approach(
+            target_marker, w_frame, h_frame,
+            us_in_stop_zone=us_in_stop_zone,
+        )
 
         vx, vy, omega = result
+
+        # Ultrasonic-driven proportional slowdown. Smoother than the old
+        # binary halve — vx is scaled linearly with US distance below
+        # `slow_cm` so deceleration starts the moment the sensor sees
+        # something close, even before the debounce fires. The debounce
+        # still gates the *log message* but the speed scaling is applied
+        # every tick because momentum is what crashes us into the marker
+        # stand. Floor at 10 so the wheels keep turning at minimum PWM.
+        if vx > 0 and not self.no_ultrasonic and 0 < us_cm < us_cfg.slow_cm:
+            scale = max(0.20, us_cm / us_cfg.slow_cm)
+            new_vx = max(int(vx * scale), 10)
+            if slow_now and new_vx != vx:
+                print(f"[ArUco] US slow: us={us_cm:.0f}cm, vx {vx}->{new_vx} (scale={scale:.2f})")
+            vx = new_vx
 
         # Announce arrival once when hold-mode first engages
         if self.aruco_approach.is_holding() and not self._aruco_arrived_announced:
@@ -1301,8 +1464,11 @@ class AlfredFSM:
                 self._reroute_clear_count = 0
                 return
 
-            # Path-clear check — same streak logic as drive_around.
-            if not self._check_camera_obstacle():
+            # Path-clear check. Camera contour can flicker on shadows / the
+            # tag border, which used to stall the arc. Ultrasonic > slow_cm
+            # (or no echo at all) is a reliable "nothing in front" cue and
+            # short-circuits the camera if it disagrees.
+            if self._reroute_path_clear():
                 self._reroute_clear_count += 1
                 # Minimum curve time 0.5 s + 5 clear frames means we committed
                 # to the arc before exiting.
@@ -1371,28 +1537,27 @@ class AlfredFSM:
                 return
 
         # ===== Phase 2: drive forward past the obstacle =====
+        # Per user spec (2026-04-23): rotate 90°, then **drive forward for
+        # 2 seconds** (don't navigate around the obstacle, just sidestep
+        # past it), then rotate 90° back and search for the marker.
+        # Ultrasonic safety overrides the timer — if something appears
+        # within slow_cm during the drive, abort to turn_away with a fresh
+        # side choice rather than ramming it.
+        DRIVE_AROUND_SECONDS = 2.0
         if self._reroute_phase == "drive_around":
-            # Watch the path ahead. If the obstacle reappears (wrap-around,
-            # another obstacle), go back to turn_away with fresh direction.
-            if self._check_camera_obstacle():
-                self._reroute_clear_count = 0
-                # Re-enter turn_away with a fresh side choice (clearance may
-                # have shifted now that we've moved).
-                print("[Reroute] New obstacle during drive — re-rotating.")
+            us_cm_now = self.uart.get_distance() if not self.no_ultrasonic else -1.0
+            us_unsafe = (
+                not self.no_ultrasonic
+                and 0 < us_cm_now < self.config.ultrasonic.slow_cm
+            )
+            if us_unsafe:
+                print(f"[Reroute] US={us_cm_now:.0f}cm during sidestep — re-rotating.")
                 self._reroute_phase = "turn_away"
                 self._reroute_phase_start = now
                 self._reroute_omega_sign = self._choose_reroute_side()
                 return
-            else:
-                self._reroute_clear_count += 1
 
-            # Need the path clear for a short streak AND minimum drive time
-            # so we actually move past the obstacle, not just peek past it.
-            if self._reroute_clear_count >= 5 and phase_elapsed > 0.8:
-                self._reroute_phase = "turn_back"
-                self._reroute_phase_start = now
-            elif phase_elapsed > 3.0:
-                # Per-phase timeout.
+            if phase_elapsed >= DRIVE_AROUND_SECONDS:
                 self._reroute_phase = "turn_back"
                 self._reroute_phase_start = now
             else:

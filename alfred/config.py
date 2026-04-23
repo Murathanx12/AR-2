@@ -63,12 +63,33 @@ class UARTConfig:
 
 @dataclass(frozen=True)
 class UltrasonicConfig:
-    """3x Ultrasonic sensors (HC-SR04) — R4 obstacle detection."""
-    threshold_cm: float = 20.0  # obstacle detection threshold
-    # ESP32 GPIO pins (for reference only — firmware handles hardware)
-    pins_left: Tuple[int, int] = (19, 20)    # trig, echo
-    pins_center: Tuple[int, int] = (18, 1)   # trig, echo
-    pins_right: Tuple[int, int] = (40, 39)   # trig, echo
+    """HC-SR04 ultrasonic — single centre sensor (TRIG=GPIO8, ECHO=GPIO9)."""
+    # Hard emergency: any sustained reading below this triggers BLOCKED.
+    threshold_cm: float = 20.0
+    # Approach-time slowdown: halve forward speed when the centre sensor
+    # has been reading closer than this for `slow_debounce` ticks. The
+    # debounce keeps a single noisy short-range echo from yanking speed.
+    # 60 cm = camera-stop (40 cm) + 20 cm of slow-down runway.
+    slow_cm: float = 60.0
+    slow_debounce: int = 3
+    # Ultrasonic-confirmed stop zone (used in addition to camera distance).
+    # When the centre US has been reading <= this for `stop_debounce` ticks
+    # AND the marker is visible, we treat that as "in stop band" — the 3 s
+    # arrival debounce in ArucoApproach starts ticking even if the camera
+    # distance estimate is still slightly above STOP_DIST_M (40 cm).
+    # 30 cm: per user spec "when ultrasonic is below 30 it stops if QR is
+    # visible (means it reached)".
+    stop_cm: float = 30.0
+    stop_debounce: int = 3
+    # Reroute trigger: a sustained reading closer than this is treated as
+    # a real obstacle in the path — but only when the camera believes the
+    # marker is at least `reroute_margin_cm` further away. Otherwise the
+    # sensor is just seeing the marker stand and we should keep approaching.
+    reroute_cm: float = 30.0
+    reroute_debounce: int = 6
+    reroute_margin_cm: float = 10.0
+    # Reference only — firmware (esp32/src/main.cpp) is authoritative.
+    pins_center: Tuple[int, int] = (8, 9)    # trig, echo
 
 
 @dataclass(frozen=True)

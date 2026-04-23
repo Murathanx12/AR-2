@@ -34,19 +34,19 @@
 const int irPins[5] = {IR_W_PIN, IR_NW_PIN, IR_N_PIN, IR_NE_PIN, IR_E_PIN};
 
 // ---------------- Ultrasonic sensor (1x HC-SR04, center only) -------------
-// Build state (2026-04-23): the center HC-SR04 is wired through a
-// bidirectional level shifter on channels B0/B1. The ESP side is on
-// shifter A0=GPIO40 and A1=GPIO39. Confirmed wiring: TRIG on GPIO39,
-// ECHO on GPIO40.
+// Build state (2026-04-23): the centre HC-SR04 is wired through a fresh
+// bidirectional level shifter. The ESP side sits on the shifter A-channels:
+//     TRIG = GPIO8  (formerly SDA)
+//     ECHO = GPIO9  (formerly SCL)
+// Confirmed working at this pinout via standalone diagnostic — readings
+// stable to ~30 cm. The previous GPIO39/40 wiring had a level-shifter fault
+// (both A-pins clamped LOW) and is retired.
 //
-// GPIO 18 and GPIO 1 are now used for servo outputs (see servo section
-// below), NOT ultrasonic.
-// Default pin assignments. The orientation (which wire is TRIG, which
-// is ECHO) can be swapped at runtime via the UART command `ultra_swap`
-// without reflashing — useful when we don't know how the physical wires
-// are plugged into the shifter.
-#define TRIG_C_PIN_DEFAULT 39
-#define ECHO_C_PIN_DEFAULT 40
+// Pins remain runtime-swappable from the Pi via the UART commands
+// `ultra_swap` (flip TRIG/ECHO) and `ultra_pins:t,e` (set explicit pins) so
+// the orientation can be flipped without reflashing.
+#define TRIG_C_PIN_DEFAULT 8
+#define ECHO_C_PIN_DEFAULT 9
 int trigPin = TRIG_C_PIN_DEFAULT;
 int echoPin = ECHO_C_PIN_DEFAULT;
 
@@ -508,6 +508,45 @@ void handleCommand(const String& commandName, const String& paramsStr)
       }
     }
   }
+  // --- Ultrasonic self-test -------------------------------------------
+  // Reports the raw level of each pin without triggering. Lets us
+  // diagnose:
+  //   ECHO = HIGH steady  -> pull-up wins; signal never arrives
+  //                          (common-ground fault OR shifter VCCB missing)
+  //   ECHO = LOW  steady  -> line pulled to ground somewhere
+  //                          (wire shorted / mis-plugged)
+  //   ECHO = toggling     -> noise / ungrounded input
+  //                          (sensor powered but floating, typical of bad GND)
+  // Also pulses TRIG five times spaced 20ms apart so a scope / LED
+  // can confirm the trigger side is physically reaching the sensor.
+  else if (commandName == "selftest") {
+    uart2.print("SELFTEST: trig=GPIO"); uart2.print(trigPin);
+    uart2.print("  echo=GPIO"); uart2.println(echoPin);
+
+    // 1. Sample echo for 200ms WITHOUT triggering
+    int high_count = 0, low_count = 0;
+    unsigned long t_end = millis() + 200;
+    while (millis() < t_end) {
+      if (digitalRead(echoPin) == HIGH) high_count++;
+      else low_count++;
+      delayMicroseconds(100);
+    }
+    uart2.print("SELFTEST: echo idle (no trigger): ");
+    uart2.print(high_count); uart2.print(" HIGH, ");
+    uart2.print(low_count); uart2.println(" LOW samples over 200ms");
+
+    // 2. Five trigger pulses with 20ms spacing, report echo each time
+    for (int i = 0; i < 5; i++) {
+      digitalWrite(trigPin, LOW);  delayMicroseconds(2);
+      digitalWrite(trigPin, HIGH); delayMicroseconds(10);
+      digitalWrite(trigPin, LOW);
+      long dur = pulseIn(echoPin, HIGH, 30000);
+      uart2.print("SELFTEST: pulse "); uart2.print(i+1);
+      uart2.print(" -> duration="); uart2.print(dur); uart2.println(" us");
+      delay(20);
+    }
+    uart2.println("SELFTEST: done");
+  }
   else {
     SERIAL.println("Unknown command");
   }
@@ -538,14 +577,14 @@ void setup()
   // Buzzer
   pinMode(BUZZER_PIN, OUTPUT);
 
-  SERIAL.println("ESP32 V4.4 booting...");
+  SERIAL.println("ESP32 V4.5 booting...");
   SERIAL.println("UART2 on GPIO16(RX)/GPIO17(TX) at 115200");
   SERIAL.print("Ultrasonic: TRIG=GPIO");
   SERIAL.print(trigPin);
   SERIAL.print(" ECHO=GPIO");
   SERIAL.println(echoPin);
 
-  uart2.print("ESP32 Ready (V4.4 — ultrasonic TRIG=");
+  uart2.print("ESP32 Ready (V4.5 — ultrasonic TRIG=");
   uart2.print(trigPin);
   uart2.print(" ECHO=");
   uart2.print(echoPin);

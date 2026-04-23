@@ -169,39 +169,95 @@ class RealtimeVoiceListener(VoiceListener):
         import pyaudio
 
         pa = pyaudio.PyAudio()
-        target_idx = 0
+        # Scored device selection — same policy as the batch listener
+        # (alfred/voice/listener.py). Prefer PnP / microphone / headset,
+        # hard-negative the broken "USB2.0 Device" combo dongle, allow
+        # pipewire/default as last-resort fallbacks. The previous version
+        # of this listener fell through to `target_idx=0` when the name
+        # search missed, which on this Pi is a 0-input-channel device →
+        # `pa.open(channels=1, ...)` raises [Errno -9998] Invalid number
+        # of channels and the realtime session goes dark.
+        candidates = []
         for i in range(pa.get_device_count()):
-            info = pa.get_device_info_by_index(i)
-            name = (info.get("name") or "").lower()
-            if info.get("maxInputChannels", 0) <= 0:
+            try:
+                info = pa.get_device_info_by_index(i)
+            except Exception:
                 continue
-            if "pnp" in name or "pcm2902" in name:
-                target_idx = i
+            if info.get("maxInputChannels", 0) < 1:
+                continue
+            candidates.append((i, str(info.get("name", ""))))
+
+        def _score(name: str) -> int:
+            n = name.lower()
+            if "usb2.0 device" in n:                return -10
+            if "pnp" in n or "pcm2902" in n:        return 100
+            if "microphone" in n or "mic" in n:     return 50
+            if "headset" in n:                       return 40
+            if "usb" in n:                           return 20
+            if "pipewire" in n or "pulse" in n:      return 10
+            if n == "default":                       return 3
+            return 0
+
+        attempts = []  # list of (label, idx, name, rate) to try in order
+        if candidates:
+            chosen_idx, chosen_name = max(candidates, key=lambda c: _score(c[1]))
+            try:
+                native_rate = int(
+                    pa.get_device_info_by_index(chosen_idx)
+                      .get("defaultSampleRate") or self.SAMPLE_RATE
+                )
+            except Exception:
+                native_rate = self.SAMPLE_RATE
+            # Try 16 kHz first (no resampling needed); fall back to native.
+            for rate in {self.SAMPLE_RATE, native_rate}:
+                attempts.append(("chosen", chosen_idx, chosen_name, rate))
+        # PipeWire fallback — when the PnP mic is held by PipeWire (its
+        # subdevice shows 0/1 in `arecord -l`), the only way to get the
+        # audio is via the pipewire device, which routes through PW's
+        # session manager and resamples to 16 kHz transparently.
+        for i, name in candidates:
+            if "pipewire" in name.lower():
+                attempts.append(("pipewire", i, name, self.SAMPLE_RATE))
+        for i, name in candidates:
+            if name.lower() == "default":
+                attempts.append(("default", i, name, self.SAMPLE_RATE))
+
+        stream = None
+        actual_rate = self.SAMPLE_RATE
+        last_err = None
+        for label, idx, name, rate in attempts:
+            try:
+                frames = self.CHUNK_FRAMES if rate == self.SAMPLE_RATE else \
+                         int(rate * self.CHUNK_MS / 1000)
+                stream = pa.open(
+                    format=pyaudio.paInt16, channels=1, rate=rate,
+                    input=True, input_device_index=idx,
+                    frames_per_buffer=frames,
+                )
+                actual_rate = rate
+                print(f"[Voice/RT] Using mic ({label}): idx={idx} {name!r} @ {rate} Hz")
                 break
-        info = pa.get_device_info_by_index(target_idx)
-        native_rate = int(info.get("defaultSampleRate") or self.SAMPLE_RATE)
-        print(f"[Voice] mic idx={target_idx} '{info['name']}' rate={native_rate}")
-        # Try 16 kHz; fall back to native and resample on the fly.
-        try:
-            stream = pa.open(
-                format=pyaudio.paInt16, channels=1, rate=self.SAMPLE_RATE,
-                input=True, input_device_index=target_idx,
-                frames_per_buffer=self.CHUNK_FRAMES,
-            )
-            actual_rate = self.SAMPLE_RATE
-        except OSError:
-            frames = int(native_rate * self.CHUNK_MS / 1000)
-            stream = pa.open(
-                format=pyaudio.paInt16, channels=1, rate=native_rate,
-                input=True, input_device_index=target_idx,
-                frames_per_buffer=frames,
-            )
-            actual_rate = native_rate
+            except Exception as e:
+                last_err = e
+                print(f"[Voice/RT] mic idx={idx} ({label}) rejected @ {rate} Hz: {e}")
+                continue
+        if stream is None:
+            print(f"[Voice/RT] No mic could be opened. Last error: {last_err}")
+            pa.terminate()
+            raise RuntimeError(f"realtime listener: no usable input device ({last_err})")
         self._actual_rate = actual_rate
 
         loop = asyncio.get_running_loop()
         resample_state = None
         last_gain_refresh = time.monotonic()
+        # Adaptive gain-recovery state. PipeWire can dynamically lower the
+        # source volume on the PnP mic ("ducking") which silently kills
+        # voice. We track the recent peak RMS and force a re-pin whenever
+        # the level has been flat-low for a while AND the speaker isn't
+        # the one talking (because TTS-only audio is naturally quiet on
+        # this mic when the speaker is on the other side of the robot).
+        recent_peak = 0
+        last_loud_time = time.monotonic()
         try:
             while self._running:
                 data = await loop.run_in_executor(
@@ -217,15 +273,44 @@ class RealtimeVoiceListener(VoiceListener):
                         self._last_rms = audioop.rms(data, 2)
                 except Exception:
                     pass
-                # TTS gate — don't feed speaker audio back to STT.
-                if self._speaker and self._speaker.is_speaking:
-                    continue
+                # NOTE: mic stays open during TTS so a "stop" said over our
+                # own announcement still reaches the API. Self-echo (the mic
+                # picking up the speaker) is filtered on the receive side via
+                # speaker.was_recently_said(). Previously this gate dropped
+                # every audio frame while TTS was playing — that's why "stop"
+                # never registered if the user spoke during a state-transition
+                # announcement.
                 if time.monotonic() < self._muted_until:
                     continue
                 # Periodic gain re-pin (PipeWire can override amixer).
-                if time.monotonic() - last_gain_refresh > 10.0:
-                    self._force_fixed_gain()
-                    last_gain_refresh = time.monotonic()
+                # `_force_fixed_gain` spawns several `subprocess.run()` calls
+                # (amixer + wpctl) that each take 50-500 ms. Running it
+                # directly here BLOCKS the audio loop for the same window —
+                # that's how the alfred build dropped to "near zero" mic
+                # quality vs the standalone test. Offload to the executor
+                # so the audio pump keeps reading PCM during the re-pin.
+                now_t = time.monotonic()
+                if now_t - last_gain_refresh > 5.0:
+                    last_gain_refresh = now_t
+                    loop.run_in_executor(None, self._force_fixed_gain)
+
+                # Reactive re-pin: if peak RMS over the last ~3 s is well
+                # below a typical voice/ambient floor (≤80 RMS units), force
+                # an immediate re-pin. Skip while TTS is talking.
+                if self._last_rms > recent_peak:
+                    recent_peak = self._last_rms
+                if self._last_rms > 80:
+                    last_loud_time = now_t
+                    recent_peak = self._last_rms
+                tts_active = bool(self._speaker and self._speaker.is_speaking)
+                if (not tts_active
+                        and now_t - last_loud_time > 3.0
+                        and recent_peak < 80):
+                    print(f"[Voice/RT] reactive gain re-pin (peak={recent_peak} over 3s)")
+                    last_gain_refresh = now_t
+                    last_loud_time = now_t
+                    recent_peak = 0
+                    loop.run_in_executor(None, self._force_fixed_gain)
                 # Resample to 16 kHz if needed.
                 if actual_rate != self.SAMPLE_RATE:
                     data, resample_state = audioop.ratecv(
@@ -259,6 +344,19 @@ class RealtimeVoiceListener(VoiceListener):
                         or "").strip()
                 if is_hallucination(text):
                     logger.debug(f"[realtime] drop hallucination: {text!r}")
+                    continue
+                # Self-echo suppression: the mic stays open during TTS so we
+                # can hear "stop" mid-announcement. Filter out the listener
+                # transcribing our own speaker output. Exception: if the
+                # transcript IS a stop word, always pass it through — even
+                # if "stop" happens to appear in a recent TTS phrase, the
+                # cost of acting on it is just an unnecessary stop.
+                stripped = text.strip().lower().rstrip(".!,?")
+                is_stop_word = stripped in ("stop", "halt", "freeze")
+                if (not is_stop_word
+                        and self._speaker
+                        and self._speaker.was_recently_said(text)):
+                    logger.debug(f"[realtime] drop self-echo: {text!r}")
                     continue
                 with self._lock:
                     self._last_text = text

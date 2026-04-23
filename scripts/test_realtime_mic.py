@@ -193,32 +193,67 @@ class BubbleUI:
 
 
 def open_pi_mic():
-    """Open the USB PnP mic at 16kHz mono. Same device picker as the listener."""
+    """Open the best USB mic at 16 kHz mono.
+
+    On this Pi PipeWire grabs both USB audio cards the moment they
+    enumerate, so PyAudio almost never sees the PnP mic as a direct
+    `pnp`/`pcm2902` device — only via the `pipewire`/`default` bridge.
+    Score-and-fall-back (same policy as alfred/voice/listener.py).
+    """
     pa = pyaudio.PyAudio()
-    target_idx = 0
-    # Find PnP mic explicitly (skip the bad USB2.0 combo on this Pi)
+    candidates = []
     for i in range(pa.get_device_count()):
-        info = pa.get_device_info_by_index(i)
-        name = (info.get("name") or "").lower()
-        if info.get("maxInputChannels", 0) <= 0:
+        try:
+            info = pa.get_device_info_by_index(i)
+        except Exception:
             continue
-        if "pnp" in name or "pcm2902" in name:
-            target_idx = i
-            break
-    info = pa.get_device_info_by_index(target_idx)
-    native_rate = int(info.get("defaultSampleRate") or SAMPLE_RATE)
-    print(f"[mic] idx={target_idx} '{info['name']}' native_rate={native_rate}")
-    # Try 16k first; fall back to native and downsample in Python
-    try:
-        stream = pa.open(format=pyaudio.paInt16, channels=1, rate=SAMPLE_RATE,
-                         input=True, input_device_index=target_idx,
-                         frames_per_buffer=CHUNK_FRAMES)
-        return pa, stream, SAMPLE_RATE
-    except OSError:
-        stream = pa.open(format=pyaudio.paInt16, channels=1, rate=native_rate,
-                         input=True, input_device_index=target_idx,
-                         frames_per_buffer=int(native_rate * CHUNK_MS / 1000))
-        return pa, stream, native_rate
+        if info.get("maxInputChannels", 0) < 1:
+            continue
+        candidates.append((i, str(info.get("name", ""))))
+
+    def _score(name: str) -> int:
+        n = name.lower()
+        if "usb2.0 device" in n:                return -10
+        if "pnp" in n or "pcm2902" in n:        return 100
+        if "microphone" in n or "mic" in n:     return 50
+        if "headset" in n:                       return 40
+        if "usb" in n:                           return 20
+        if "pipewire" in n or "pulse" in n:      return 10
+        if n == "default":                       return 3
+        return 0
+
+    attempts = []
+    if candidates:
+        chosen_idx, chosen_name = max(candidates, key=lambda c: _score(c[1]))
+        try:
+            native_rate = int(pa.get_device_info_by_index(chosen_idx)
+                                .get("defaultSampleRate") or SAMPLE_RATE)
+        except Exception:
+            native_rate = SAMPLE_RATE
+        for rate in {SAMPLE_RATE, native_rate}:
+            attempts.append(("chosen", chosen_idx, chosen_name, rate))
+    for i, name in candidates:
+        if "pipewire" in name.lower():
+            attempts.append(("pipewire", i, name, SAMPLE_RATE))
+    for i, name in candidates:
+        if name.lower() == "default":
+            attempts.append(("default", i, name, SAMPLE_RATE))
+
+    last_err = None
+    for label, idx, name, rate in attempts:
+        try:
+            frames = CHUNK_FRAMES if rate == SAMPLE_RATE else \
+                     int(rate * CHUNK_MS / 1000)
+            stream = pa.open(format=pyaudio.paInt16, channels=1, rate=rate,
+                             input=True, input_device_index=idx,
+                             frames_per_buffer=frames)
+            print(f"[mic] using ({label}): idx={idx} '{name}' @ {rate} Hz")
+            return pa, stream, rate
+        except Exception as e:
+            last_err = e
+            print(f"[mic] idx={idx} ({label}) rejected @ {rate} Hz: {e}")
+    pa.terminate()
+    raise RuntimeError(f"no usable input device ({last_err})")
 
 
 async def realtime_loop(ui: BubbleUI, stop_event: threading.Event):
