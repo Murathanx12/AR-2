@@ -35,6 +35,7 @@ Available intents:
 - dance: Perform a dance routine
 - take_photo: Take a photo / picture / selfie
 - show_photos: Show me the picture / photos / gallery / show me what you took
+- explain_task: What are you doing / explain the task / describe your current task / tell me what you're up to / repeat what you are doing
 - come_here: Come to me / follow me / come here
 - patrol: Patrol / wander / roam / explore the area
 - sleep: Go to sleep / rest / standby
@@ -95,6 +96,22 @@ class IntentClassifier:
         "take photo": "take_photo",
         "take a picture": "take_photo",
         "take picture": "take_photo",
+        "what are you doing": "explain_task",
+        "what're you doing": "explain_task",
+        "whats your current task": "explain_task",
+        "what's your current task": "explain_task",
+        "explain the task": "explain_task",
+        "explain the current task": "explain_task",
+        "explain what you are doing": "explain_task",
+        "explain what you're doing": "explain_task",
+        "repeat what you are doing": "explain_task",
+        "repeat what you're doing": "explain_task",
+        "tell me what you're doing": "explain_task",
+        "tell me what you are doing": "explain_task",
+        "describe your task": "explain_task",
+        "describe the task": "explain_task",
+        "what are you up to": "explain_task",
+        "current task": "explain_task",
         "show me the picture": "show_photos",
         "show me the photo": "show_photos",
         "show me the photos": "show_photos",

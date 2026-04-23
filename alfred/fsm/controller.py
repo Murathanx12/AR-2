@@ -723,6 +723,20 @@ class AlfredFSM:
             self.transition(State.SLEEPING)
             return
 
+        # Explain the current task — speak a natural-language description of
+        # the FSM state + context (marker id, reroute phase, etc.). Does not
+        # change state. Also shows a banner on the demo face for 5 seconds.
+        if intent == "explain_task":
+            desc = self._describe_current_task()
+            print(f"[ExplainTask] {desc}")
+            if self.speaker:
+                self.speaker.say(desc)
+            if self.gui:
+                self.gui.set_voice_output(desc)
+                if hasattr(self.gui, "show_task_banner"):
+                    self.gui.show_task_banner(desc)
+            return
+
         # Show photo gallery — announce URL, stay in current state
         if intent == "show_photos":
             import socket
@@ -838,6 +852,86 @@ class AlfredFSM:
 
         elif intent == "unknown":
             self._route_to_conversation(text)
+
+    def _describe_current_task(self):
+        """Plain-English sentence describing what Sonny is doing right now.
+
+        Used by the `explain_task` voice intent — when the user asks
+        "what are you doing" the robot speaks this. Includes context
+        that isn't just the state name (target marker id, obstacle
+        status, last voice command, reroute phase).
+        """
+        st = self.state
+
+        if st == State.IDLE:
+            return "I am standing by and waiting for your next command."
+
+        if st == State.LISTENING:
+            return "I am listening for a voice command."
+
+        if st == State.FOLLOWING:
+            return "I am following the black line on the floor."
+
+        if st == State.ENDPOINT:
+            return "I have reached the end of the track."
+
+        if st == State.PARKING:
+            return "I am parking at the delivery zone."
+
+        if st == State.ARUCO_SEARCH:
+            target = getattr(self, "_aruco_target_id", None)
+            if target is not None:
+                return f"I am searching for ArUco marker number {target}."
+            return "I am searching for any ArUco marker in view."
+
+        if st == State.ARUCO_APPROACH:
+            target = getattr(self, "_aruco_target_id", None)
+            if target is not None:
+                return (f"I have found marker {target} and I am "
+                        f"approaching it. I will stop about twenty "
+                        f"centimetres in front.")
+            return ("I have found a marker and I am approaching it. "
+                    "I will stop about twenty centimetres in front.")
+
+        if st == State.BLOCKED:
+            return ("There is an obstacle in front of me. I am waiting "
+                    "for the path to clear before continuing.")
+
+        if st == State.REROUTING:
+            phase = getattr(self, "_reroute_phase", None)
+            if phase == "turn_away":
+                return "The path is blocked. I am rotating to face away from the obstacle."
+            if phase == "drive_around":
+                return "The path is blocked. I am driving around the obstacle."
+            if phase == "turn_back":
+                return "I am turning back to look for my target marker."
+            return "The path is blocked, so I am finding a way around the obstacle."
+
+        if st == State.PATROL:
+            return "I am patrolling the area. I will approach people or gestures if I see them."
+
+        if st == State.PERSON_APPROACH:
+            return "I can see a person. I am approaching them."
+
+        if st == State.DANCING:
+            return "I am dancing!"
+
+        if st == State.PHOTO:
+            return "I am taking a photo."
+
+        if st == State.LOST_REVERSE:
+            return "I lost the line. I am reversing to recover it."
+
+        if st == State.LOST_PIVOT:
+            return "I lost the line. I am pivoting in place to find it again."
+
+        if st == State.STOPPING:
+            return "I am stopping all movement."
+
+        if st == State.SLEEPING:
+            return "I am sleeping. Say hello Sonny to wake me up."
+
+        return "I am not sure what I am doing right now. Please give me a command."
 
     def _route_to_conversation(self, text):
         """Route text to conversation engine, or ask to rephrase if unavailable."""

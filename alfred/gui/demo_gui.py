@@ -144,6 +144,14 @@ class DemoGUI:
         self._blink_time = 0
         self._idle_gaze_time = time.monotonic()
 
+        # Smoothly-interpolated eye color so state transitions don't snap.
+        self._current_color = (100, 140, 220)
+
+        # "Explain task" banner — set by show_task_banner(), drawn for a
+        # few seconds across the top third of the face.
+        self._banner_text = ""
+        self._banner_until = 0.0
+
     def start(self):
         pygame.init()
         if self._fullscreen:
@@ -187,6 +195,16 @@ class DemoGUI:
     def set_voice_output(self, text):
         self._voice_output = text
         self._voice_output_time = time.monotonic()
+
+    def show_task_banner(self, text, duration=6.0):
+        """Display a full-width task description banner for `duration` seconds.
+
+        Called by the FSM when the user asks "what are you doing".
+        Complements TTS — ensures the description is readable even if
+        the speaker is inaudible.
+        """
+        self._banner_text = text
+        self._banner_until = time.monotonic() + duration
 
     def set_gesture(self, gesture):
         pass
@@ -258,7 +276,15 @@ class DemoGUI:
         BG = (12, 14, 20)
         self._screen.fill(BG)
 
-        eye_color = STATE_COLORS.get(state, (120, 140, 200))
+        # Smoothly interpolate eye color from the old state toward the new
+        # one instead of snapping. 12% per 30fps tick ≈ 250ms ease-in.
+        target_color = STATE_COLORS.get(state, (120, 140, 200))
+        lerp = 0.12
+        self._current_color = tuple(
+            int(cur + (tgt - cur) * lerp)
+            for cur, tgt in zip(self._current_color, target_color)
+        )
+        eye_color = self._current_color
         emotion = EMOTION_FROM_STATE.get(state, "neutral")
         STATUS_H = 120
 
@@ -370,6 +396,56 @@ class DemoGUI:
             rainbow = (int(r * 255), int(g * 255), int(b * 255))
             pygame.draw.rect(self._screen, rainbow, (0, 0, W, H), 6)
 
+        # Marker-ID target badge — small floating chip in top-right while
+        # actively chasing a specific marker. Big enough to spot from
+        # across the room, small enough not to fight the eyes for focus.
+        target_id = fsm._aruco_target_id if fsm else None
+        if target_id is not None and state in (State.ARUCO_SEARCH, State.ARUCO_APPROACH):
+            badge_label = f"TARGET {target_id}"
+            label_surf = self._fonts['state'].render(badge_label, True, eye_color)
+            pad = 20
+            badge_w = label_surf.get_width() + pad * 2
+            badge_h = label_surf.get_height() + pad
+            bx, by = W - badge_w - 30, 30
+            pygame.draw.rect(self._screen, (20, 22, 30),
+                             (bx, by, badge_w, badge_h), border_radius=16)
+            pygame.draw.rect(self._screen, eye_color,
+                             (bx, by, badge_w, badge_h), 3, border_radius=16)
+            self._screen.blit(label_surf, (bx + pad, by + pad // 2))
+
+        # "Explain task" banner — full-width overlay at the top of the
+        # face for a few seconds when the user asks "what are you doing".
+        if self._banner_text and now < self._banner_until:
+            remaining = self._banner_until - now
+            alpha = max(60, min(220, int(remaining * 60)))
+            banner_h = 140
+            overlay = pygame.Surface((W, banner_h), pygame.SRCALPHA)
+            overlay.fill((20, 22, 30, alpha))
+            self._screen.blit(overlay, (0, 0))
+            pygame.draw.line(self._screen, eye_color,
+                             (0, banner_h), (W, banner_h), 3)
+            tag_surf = self._fonts['sm'].render("CURRENT TASK",
+                                                True, eye_color)
+            self._screen.blit(tag_surf, (40, 18))
+            # Wrap the task text across lines if it's long.
+            words = self._banner_text.split()
+            lines, cur = [], ""
+            for w_ in words:
+                trial = (cur + " " + w_).strip()
+                if self._fonts['voice'].size(trial)[0] > W - 80:
+                    if cur:
+                        lines.append(cur)
+                    cur = w_
+                else:
+                    cur = trial
+            if cur:
+                lines.append(cur)
+            y_text = 50
+            for ln in lines[:2]:
+                s = self._fonts['voice'].render(ln, True, (230, 235, 250))
+                self._screen.blit(s, (40, y_text))
+                y_text += 40
+
         pygame.display.flip()
         self._clock.tick(30)
         return True
@@ -378,6 +454,12 @@ class DemoGUI:
         """Draw a large animated eye."""
         base_w = int(screen_w * 0.14)
         base_h = int(area_h * 0.35)
+
+        # Subtle idle breathing — 2% amplitude, 4-second period. Barely
+        # perceptible but makes the face feel "alive" vs. dead-still.
+        breath = 1.0 + 0.02 * math.sin(time.monotonic() * (math.pi * 2 / 4.0))
+        base_w = int(base_w * breath)
+        base_h = int(base_h * breath)
 
         # Emotion adjustments
         if emotion == "happy":
