@@ -299,6 +299,7 @@ class AlfredFSM:
         self._aruco_target_id = None  # None = follow any marker, int = specific ID
         self._aruco_announced_id = None  # last marker ID we've already spoken about
         self._aruco_arrived_announced = False
+        self._aruco_done_announced = False
         self._aruco_hold_start = None
         self._last_aruco_pose = None
         self._last_frame = None
@@ -888,6 +889,7 @@ class AlfredFSM:
                     print(f"[ArUco] Following any visible marker")
                 self._aruco_announced_id = None  # fresh command, re-announce on acquire
                 self._aruco_arrived_announced = False
+                self._aruco_done_announced = False
                 self._aruco_hold_start = None
                 self._aruco_lost_frames = 0
                 # Clear stale bearing memory from a previous target.
@@ -1169,15 +1171,33 @@ class AlfredFSM:
         already_arrived = bool(
             self.aruco_approach and self.aruco_approach.is_holding()
         )
-        # NOTE (2026-04-23 ~20:15): in-approach reroute is DISABLED when
-        # the target marker is visible. The user observed the robot
-        # rotating away from the marker as it got close, when really we
-        # want it to centre on the QR + slow + stop based on US. With
-        # target visible we trust the camera (centring + arrival) and
-        # the ultrasonic slow/stop zones below. Reroute can still fire
-        # via the lost-marker branch (further down) if the marker is
-        # genuinely hidden by a closer obstacle.
-        self._us_reroute_count = 0
+        # In-approach reroute (re-enabled 2026-04-23 ~20:32 — user wants
+        # the robot to *go around* obstacles, not just halt at them).
+        # The 20 cm margin keeps this from false-positiving at the marker
+        # stand: at the stand we have marker_cm ≈ us_cm so the
+        # `marker_cm > us_cm + 20` check fails. Real obstacle in the path
+        # → marker_cm is much further out than us_cm → trigger fires.
+        real_obstacle = (
+            not self.no_ultrasonic
+            and target_marker is not None
+            and not already_arrived
+            and 0 < us_cm < us_cfg.reroute_cm
+            and marker_cm > us_cm + us_cfg.reroute_margin_cm
+        )
+        if real_obstacle:
+            self._us_reroute_count += 1
+        else:
+            self._us_reroute_count = 0
+        if self._us_reroute_count >= us_cfg.reroute_debounce:
+            print(f"[ArUco] US reroute: us={us_cm:.0f}cm, marker={marker_cm:.0f}cm")
+            if self.speaker:
+                self.speaker.say("Obstacle in the path. Going around.")
+            self._us_reroute_count = 0
+            self._us_slow_count = 0
+            self._reroute_from = State.ARUCO_APPROACH
+            self.uart.send(cmd_stop())
+            self.transition(State.REROUTING)
+            return
 
         near_slow = (
             not self.no_ultrasonic
@@ -1341,6 +1361,21 @@ class AlfredFSM:
             if self.speaker:
                 self.speaker.say("I have arrived at the marker. Your delivery is ready.")
 
+        # 3 s after arrival latched: declare done and drop to LISTENING.
+        # User spec (2026-04-23 ~20:32) — no point sitting in hold mode
+        # forever, prompt the user for the next task.
+        if (self.aruco_approach.is_holding()
+                and self._aruco_hold_start is not None
+                and not getattr(self, "_aruco_done_announced", False)
+                and time.monotonic() - self._aruco_hold_start >= 3.0):
+            self._aruco_done_announced = True
+            print(f"[ArUco] Task complete @ marker {self._aruco_target_id} — listening for next command")
+            if self.speaker:
+                self.speaker.say("Task complete. What would you like next?")
+            self.uart.send(cmd_stop())
+            self.transition(State.LISTENING)
+            return
+
         self.uart.send(cmd_vector(int(vx), int(vy), int(omega)))
         self.line_follower.debug_vx = int(vx)
         self.line_follower.debug_vy = int(vy)
@@ -1349,8 +1384,15 @@ class AlfredFSM:
     def _tick_blocked(self):
         """Stop and wait for obstacle to clear (R4).
 
-        Checks both ultrasonic AND camera before resuming. Minimum 1s dwell
-        so we don't flicker BLOCKED<->APPROACH on a single noisy frame.
+        Checks ultrasonic to decide when to resume. Camera contour false-
+        positives easily, so it's only used as a tiebreaker now.
+        Minimum 0.4 s dwell so we don't flicker BLOCKED<->APPROACH on a
+        single noisy frame, but quick to resume once US shows clear (per
+        user spec 2026-04-23 ~20:32 — "if you are not moving and stuck
+        on obstacle where the sensor is not picking anything continue
+        task"). 6 s hard timeout — if the obstacle is never cleared we
+        bail to IDLE and prompt for the next command rather than stay
+        frozen here forever.
         """
         self.uart.send(cmd_stop())
         self.line_follower.debug_vx = 0
@@ -1361,11 +1403,29 @@ class AlfredFSM:
         if self._blocked_entry_time is None:
             self._blocked_entry_time = now
 
-        # Minimum 1s in BLOCKED to avoid flicker
-        if now - self._blocked_entry_time < 1.0:
+        elapsed = now - self._blocked_entry_time
+        if elapsed < 0.4:
             return
 
         ultrasonic_clear = not self._check_ultrasonic_obstacle()
+
+        if elapsed > 6.0 and ultrasonic_clear:
+            # Sensor sees nothing close; the original camera trigger may
+            # have been a flicker. Resume the task instead of sitting.
+            print(f"[BLOCKED] timeout {elapsed:.1f}s, US clear — resuming")
+            self._blocked_entry_time = None
+            if self._previous_state in (State.FOLLOWING, State.ENDPOINT, State.PARKING,
+                                         State.LOST_REVERSE, State.LOST_PIVOT):
+                self.line_follower.reset()
+                self.transition(State.FOLLOWING)
+            elif self._previous_state == State.ARUCO_APPROACH:
+                self.transition(State.ARUCO_APPROACH)
+            elif self._previous_state == State.ARUCO_SEARCH:
+                self.transition(State.ARUCO_SEARCH)
+            else:
+                self.transition(State.IDLE)
+            return
+
         camera_clear = not self._check_camera_obstacle()
 
         if ultrasonic_clear and camera_clear:
