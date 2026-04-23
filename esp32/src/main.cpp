@@ -34,11 +34,15 @@
 const int irPins[5] = {IR_W_PIN, IR_NW_PIN, IR_N_PIN, IR_NE_PIN, IR_E_PIN};
 
 // ---------------- Ultrasonic sensor (1x HC-SR04, center only) -------------
-// Build state (2026-04-23): only the center HC-SR04 is wired. Left and
-// right pins are reserved for future expansion but not read. ECHO must
-// go through a 5V→3.3V level shifter or resistor divider.
-#define TRIG_C_PIN 18   // GPIO18 — center trigger (3.3V drives HC-SR04 fine)
-#define ECHO_C_PIN 1    // GPIO1  — center echo (level-shifted to 3.3V)
+// Build state (2026-04-23 revised): the center HC-SR04 is wired through
+// a bidirectional level shifter on channels B0/B1. The ESP side is on
+// shifter A0=GPIO40 and A1=GPIO39. Swap these two #defines if the physical
+// TRIG and ECHO wires are the other way around.
+//
+// GPIO 18 and GPIO 1 are now used for servo outputs (see servo section
+// below), NOT ultrasonic.
+#define TRIG_C_PIN 40   // GPIO40 — center trigger (via shifter B0)
+#define ECHO_C_PIN 39   // GPIO39 — center echo    (via shifter B1)
 
 // ---------------- Buzzer — R5 audio indicator ------------------------------
 #define BUZZER_PIN 46  // GPIO46
@@ -495,10 +499,11 @@ void setup()
   // Buzzer
   pinMode(BUZZER_PIN, OUTPUT);
 
-  SERIAL.println("ESP32 V4.1 booting...");
+  SERIAL.println("ESP32 V4.2 booting...");
   SERIAL.println("UART2 on GPIO16(RX)/GPIO17(TX) at 115200");
+  SERIAL.println("Ultrasonic: TRIG=GPIO40 ECHO=GPIO39");
 
-  uart2.println("ESP32 Ready (V4.1 — center ultrasonic only + buzzer)");
+  uart2.println("ESP32 Ready (V4.2 — ultrasonic on GPIO40/39 + buzzer)");
   SERIAL.println("ESP32 Ready — sent hello on UART2");
   IO_init();
 
