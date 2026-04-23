@@ -76,26 +76,35 @@ class ArucoApproach:
         return (self.PHYSICAL_MARKER_M * focal_px) / pixel_size
 
     def _forward_speed(self, dist_m):
-        """Ramp: fast when far, creep through the final ~15 cm before the
-        30 cm stop target so we don't overshoot into the hold band."""
-        if dist_m > 1.0:
-            return 40
-        if dist_m > 0.60:
-            return 30
-        if dist_m > 0.45:
-            return 20
-        return 14
+        """Quadratic ramp — vx = 35·dist², clamped [8, 30].
+
+        Top speed capped at 30 (was 40) per user spec — line follower
+        keeps its higher speed; the ArUco approach is intentionally
+        gentler now so the robot doesn't ram the marker stand. Floor of
+        8 keeps the wheels turning at minimum PWM.
+        Profile: 1.0 m → 30, 0.8 m → 22, 0.6 m → 12, 0.5 m → 8, 0.4 m → 8.
+        Combined with the controller-side `min(camera_vx, us_vx)` rule,
+        whichever sensor sees closer governs.
+        """
+        vx = int(35 * dist_m * dist_m)
+        return max(8, min(30, vx))
 
     def compute_visual_approach(self, marker, frame_width, frame_height,
                                  us_in_stop_zone: bool = False):
         """Compute motor command to approach marker.
 
-        Logic:
-        1. If marker not centered: rotate to center it (no forward motion)
-        2. If centered: drive forward, slow down as we get closer
-        3. If within STOP_DIST_M (or ultrasonic confirms stop): debounce → hold
+        Two-phase logic per user spec (2026-04-23 ~20:08):
+          1. **Centre first** — when error_x is large, rotate in place
+             with no forward motion. Diagonal mix tended to overshoot.
+          2. **Approach when centred** — drive forward; add a small
+             perspective-correcting strafe (vy) derived from the marker
+             corner heights so we end up perpendicular to the marker
+             face, not staring at it from an angle.
 
-        Always returns (vx, vy, omega). vx > 0 = forward, vx < 0 = reverse.
+        Always returns (vx, vy, omega). vx > 0 = forward, vx < 0 = reverse,
+        vy > 0 = strafe right, omega > 0 = spin right (CW from above).
+        Same sign convention as the rest of the codebase (see CLAUDE.md
+        "Direction convention").
 
         `us_in_stop_zone` is the controller's debounced "the centre HC-SR04
         agrees we're in stop range" signal. Treated as equivalent to the
@@ -179,22 +188,21 @@ class ArucoApproach:
                     self._stop_band_since = None
                     log_event(f"ARUCO: arrived! held {elapsed:.1f}s @ {dist_m:.2f}m")
                 return (0, 0, 0)
-            # In band but off-centre: strafe + rotate to centre, no forward
-            # motion. Mecanum strafe is faster and creates less motion blur
-            # than pure rotation, so the marker detection stays clean
-            # during the manoeuvre. `vy > 0` strafes right, so positive
-            # error_x (marker on right) gets positive vy. omega keeps the
-            # heading aligned for a smaller residual.
+            # In band but off-centre: small strafe + tiny rotation, no
+            # forward motion. Gains kept low here because we're already
+            # at the marker — we want a gentle nudge to centre, not the
+            # body-shifts-marker-shifts-body oscillation we saw at higher
+            # gains (the err=+0.20/-0.23 ping-pong on 2026-04-23 19:51).
             if self._stop_band_since is not None:
                 log_event(
                     f"ARUCO: drifted off centre while in band "
                     f"(err={error_x:+.2f}) — resetting hold timer"
                 )
                 self._stop_band_since = None
-            vy = int(25 * error_x)
-            vy = max(-20, min(20, vy))
-            omega = int(15 * error_x)
-            omega = max(-15, min(15, omega))
+            vy = int(12 * error_x)
+            vy = max(-12, min(12, vy))
+            omega = int(8 * error_x)
+            omega = max(-8, min(8, omega))
             return (0, vy, omega)
         if self._stop_band_since is not None:
             log_event(
@@ -202,29 +210,49 @@ class ArucoApproach:
             )
             self._stop_band_since = None
 
-        # === CENTERING: turn + strafe to face marker ===
-        # Mecanum lets us correct heading and lateral position in the same
-        # tick. Use rotation as the primary correction (so the camera
-        # actually points at the marker for the next detection), with
-        # a smaller strafe (vy) to shorten the path. For small errors,
-        # also keep moving forward — strafe + rotate while approaching.
+        # === PHASE 1: CENTRE FIRST (rotate-only when off-centre) ===
+        # User spec: don't combine forward + rotate when far from centre —
+        # the diagonal mix overshot from one side past centre to the other.
+        # Pure rotation centres without translating the body, so the marker
+        # stays put in world coords while the camera rotates onto it.
         if abs(error_x) > self.CENTER_TOLERANCE:
-            omega = int(30 * error_x)
-            omega = max(-30, min(30, omega))
-            vy = int(15 * error_x)
-            vy = max(-15, min(15, vy))
+            omega = int(35 * error_x)
+            omega = max(-40, min(40, omega))
+            log_event(
+                f"ARUCO: centring (err={error_x:+.2f}, omega={omega}) — "
+                f"rotate first, approach after"
+            )
+            return (0, 0, omega)
 
-            if abs(error_x) > 0.3:
-                log_event(f"ARUCO: centering (err={error_x:+.2f}, omega={omega}, vy={vy})")
-                return (0, vy, omega)
+        # === PHASE 2: APPROACH with perspective-correcting strafe ===
+        # Use the marker's left-edge vs right-edge pixel height to detect
+        # off-axis approach. If left edge is taller, we're standing to the
+        # marker's left → strafe right (vy>0) to line up perpendicularly.
+        # If right edge is taller, strafe left.
+        # corners convention from cv2.aruco: 0=TL, 1=TR, 2=BR, 3=BL.
+        try:
+            corners = marker["corners"]
+            left_h = float(((corners[0][0] - corners[3][0]) ** 2 +
+                            (corners[0][1] - corners[3][1]) ** 2) ** 0.5)
+            right_h = float(((corners[1][0] - corners[2][0]) ** 2 +
+                             (corners[1][1] - corners[2][1]) ** 2) ** 0.5)
+            denom = max(left_h, right_h, 1.0)
+            skew = (left_h - right_h) / denom  # signed [-1, 1]
+            # Deadband — ignore tiny perspective noise (< 5%) so we don't
+            # twitch when already roughly perpendicular.
+            if abs(skew) < 0.05:
+                skew = 0.0
+            vy_persp = int(20 * skew)
+            vy_persp = max(-15, min(15, vy_persp))
+        except Exception:
+            vy_persp = 0
 
-            speed = self._forward_speed(dist_m)
-            return (speed, vy, omega)
-
-        # === APPROACH: centered, drive forward ===
         speed = self._forward_speed(dist_m)
-        log_event(f"ARUCO: approaching (speed={speed}, dist={dist_m:.2f}m)")
-        return (speed, 0, 0)
+        log_event(
+            f"ARUCO: approaching (vx={speed}, vy_persp={vy_persp}, "
+            f"dist={dist_m:.2f}m, skew={vy_persp/20:.2f})"
+        )
+        return (speed, vy_persp, 0)
 
     def is_holding(self):
         """Whether we've arrived and are maintaining distance."""

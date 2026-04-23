@@ -66,28 +66,29 @@ class UltrasonicConfig:
     """HC-SR04 ultrasonic — single centre sensor (TRIG=GPIO8, ECHO=GPIO9)."""
     # Hard emergency: any sustained reading below this triggers BLOCKED.
     threshold_cm: float = 20.0
-    # Approach-time slowdown: halve forward speed when the centre sensor
-    # has been reading closer than this for `slow_debounce` ticks. The
-    # debounce keeps a single noisy short-range echo from yanking speed.
-    # 60 cm = camera-stop (40 cm) + 20 cm of slow-down runway.
-    slow_cm: float = 60.0
+    # Approach-time slowdown: scale forward speed proportionally below
+    # `slow_cm`. 100 cm = "react to anything within 1 m" so the robot
+    # has runway to decelerate before reaching the stop zone.
+    slow_cm: float = 100.0
     slow_debounce: int = 3
     # Ultrasonic-confirmed stop zone (used in addition to camera distance).
     # When the centre US has been reading <= this for `stop_debounce` ticks
     # AND the marker is visible, we treat that as "in stop band" — the 3 s
     # arrival debounce in ArucoApproach starts ticking even if the camera
     # distance estimate is still slightly above STOP_DIST_M (40 cm).
-    # 30 cm: per user spec "when ultrasonic is below 30 it stops if QR is
-    # visible (means it reached)".
-    stop_cm: float = 30.0
+    # 40 cm: per user spec "start stopping around 40 cm based on sensor".
+    stop_cm: float = 40.0
     stop_debounce: int = 3
     # Reroute trigger: a sustained reading closer than this is treated as
     # a real obstacle in the path — but only when the camera believes the
     # marker is at least `reroute_margin_cm` further away. Otherwise the
     # sensor is just seeing the marker stand and we should keep approaching.
-    reroute_cm: float = 30.0
+    # 70 cm trigger lets us sidestep obstacles seen well before contact.
+    # 20 cm margin keeps the marker stand from false-positiving (camera
+    # at 40 + US at 30 → 40 > 30+20 = 50 is false → no spurious reroute).
+    reroute_cm: float = 70.0
     reroute_debounce: int = 6
-    reroute_margin_cm: float = 10.0
+    reroute_margin_cm: float = 20.0
     # Reference only — firmware (esp32/src/main.cpp) is authoritative.
     pins_center: Tuple[int, int] = (8, 9)    # trig, echo
 
