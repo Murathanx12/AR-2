@@ -17,7 +17,7 @@ except ImportError:
 class CameraManager:
     """Manages video capture from a camera device via OpenCV."""
 
-    def __init__(self, camera_index=0, resolution=(640, 480), fps=30):
+    def __init__(self, camera_index=0, resolution=(1920, 1080), fps=30):
         self.camera_index = camera_index
         self.resolution = resolution
         self.fps = fps

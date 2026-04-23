@@ -176,9 +176,17 @@ class VoiceListener:
 
     @staticmethod
     def _force_fixed_gain():
-        """Turn off mic AGC + max out capture volume on any card that
-        supports those controls. Runs once at listener startup."""
+        """Turn off mic AGC + max out capture volume on every audio layer
+        we know about. Runs periodically — PipeWire/WirePlumber will
+        override ALSA amixer values dynamically otherwise.
+
+        Layers we hit, in order:
+          1. amixer per-card: controls the hardware mixer directly.
+          2. wpctl (pipewire): controls the default source + every source
+             wpctl knows about. Essential on Ubuntu 24 with PipeWire.
+        """
         import subprocess
+        # --- amixer: hw-level ---
         for card in range(6):
             try:
                 subprocess.run(
@@ -189,8 +197,56 @@ class VoiceListener:
                     ["amixer", "-c", str(card), "set", "Mic", "100%"],
                     capture_output=True, timeout=2,
                 )
+                subprocess.run(
+                    ["amixer", "-c", str(card), "set", "Mic Capture Volume", "100%"],
+                    capture_output=True, timeout=2,
+                )
             except Exception:
                 pass
+        # --- wpctl: pipewire layer ---
+        try:
+            r = subprocess.run(["wpctl", "status"], capture_output=True, timeout=2, text=True)
+            if r.returncode == 0:
+                # Parse source IDs from the `Sources:` block. `*` marks default.
+                in_sources = False
+                for line in r.stdout.splitlines():
+                    if "Sources:" in line:
+                        in_sources = True
+                        continue
+                    if in_sources:
+                        if line.strip().startswith("└─") or line.strip().startswith("├─"):
+                            break
+                        # Line looks like " │     75. Name ... [vol: 1.00]"
+                        tok = line.replace("*", "").strip().lstrip("│").strip()
+                        if not tok or "." not in tok.split()[0]:
+                            continue
+                        try:
+                            sid = int(tok.split(".")[0])
+                        except ValueError:
+                            continue
+                        subprocess.run(
+                            ["wpctl", "set-volume", str(sid), "1.0"],
+                            capture_output=True, timeout=2,
+                        )
+                        subprocess.run(
+                            ["wpctl", "set-mute", str(sid), "0"],
+                            capture_output=True, timeout=2,
+                        )
+                # Also pin the default source explicitly.
+                subprocess.run(
+                    ["wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", "1.0"],
+                    capture_output=True, timeout=2,
+                )
+        except FileNotFoundError:
+            pass  # wpctl not installed — system uses pure ALSA, amixer is enough
+        except Exception:
+            pass
+
+    # Expose recent RMS for UIs (no second stream needed).
+    @property
+    def current_rms(self):
+        with self._lock:
+            return getattr(self, "_last_rms", 0)
 
     def stop(self):
         self._running = False
@@ -571,6 +627,9 @@ class VoiceListener:
                     last_gain_refresh = time.monotonic()
 
                 energy = self._rms(data)
+                # Publish for UIs (mic test, dashboards). Locked write.
+                with self._lock:
+                    self._last_rms = energy
 
                 if energy > self.SILENCE_THRESHOLD:
                     # Speech detected
@@ -619,11 +678,8 @@ class VoiceListener:
             if text:
                 self._engine = "openai-api"
 
-        if not text and _HAS_GOOGLE_STT:
-            text = self._transcribe_google(audio_data)
-            if text:
-                self._engine = "google"
-
+        # Google STT intentionally disabled — OpenAI Whisper API is the primary
+        # and only cloud STT. faster-whisper is the local fallback when offline.
         if not text and _HAS_WHISPER:
             text = self._transcribe_whisper(audio_data)
             if text:

@@ -3,21 +3,69 @@ Sonny (Alfred V4) — Mecanum-wheeled robotic butler for HKU School of Innovatio
 Demo: April 24, 2026. Repo: https://github.com/Murathanx12/AR-2
 Wake phrase: "Hello Sonny" (say once, stays awake until "sleep")
 
-Known Issues (Apr 20, 2026)
+Status (Apr 23, 2026) — ALL KNOWN CODE BUGS RESOLVED
 
-1. ESP32 motors not responding — UART connects but motors don't spin. Suspected hardware (wiring/short/battery). Run scripts/test_esp32.py to diagnose. CRITICAL for demo.
-2. USB microphone weak — only picks up from ~30cm. WORKAROUND: use phone as wireless mic via web dashboard (http://<pi-ip>:8080, hold-to-talk button).
-3. Obstacle detection — YOLO (offline, primary) + 3x ultrasonic HC-SR04 (left/center/right, ~90° coverage). OpenAI Vision scene analyzer is opt-in via `--vision-ai` flag (off by default to save API budget).
-4. MediaPipe not installed on Pi — person/gesture detection unavailable. Install: pip install mediapipe
-5. OpenCV ArUco API — Pi has older OpenCV, code supports both old and new API. If ArUco fails, check cv2 version.
-6. USB hub power — camera and mic must be plugged directly into Pi USB ports, NOT through the USB hub.
-7. VPN not auto-starting — run `sudo openvpn --config /etc/openvpn/windscribe.conf --daemon` each boot, or set up systemd service (see below).
+Software: Every item on the previous bug list (phone mic wake, double intent,
+re-detect in /video_feed, ArUco hold-mode exit to IDLE, Google STT sample rate,
+NeoPixel UART waste, BLOCKED flicker, stale firmware comment) is fixed on main
+as of today. See TODO.md for a fix-by-fix table and the 18 cm ArUco calibration
+test plan.
+
+Remaining hardware checks (not code issues):
+1. ESP32 motors — UART connects but motors pending physical verification. Run
+   scripts/test_esp32.py before demo. Camera/voice/vision all function without motors.
+2. Ultrasonic sensors (HC-SR04 × 3) — not currently wired. `--no-ultrasonic`
+   flag is the default path; camera-based YOLO + contour detection handles R4.
+3. MediaPipe — optional. Install with `pip install mediapipe` for gesture EC1.
+4. USB hub — camera and mic must go directly into Pi USB ports, not the hub.
+5. VPN — run `sudo openvpn --config /etc/openvpn/windscribe.conf --daemon`
+   each boot (or create a systemd service).
+
+Voice pipeline (2026-04-23, confirmed on hardware):
+- **Primary:** OpenAI Realtime API over WebSocket — model `gpt-4o-mini-realtime-preview`
+  for the connection, `gpt-4o-mini-transcribe` for STT. Server-side VAD, modalities=text,
+  create_response=false. File: `alfred/voice/realtime_listener.py:RealtimeVoiceListener`.
+  Never blocks the capture loop — "stop" is heard even while a prior utterance is being
+  transcribed.
+- **Fallback:** batch `/v1/audio/transcriptions` path in `alfred/voice/listener.py` (same
+  class the FSM used before), used if realtime SDK / key / network is missing at startup.
+- **Local fallback:** faster-whisper (offline). Imports lazily; model loaded only if the
+  batch path needs to transcribe.
+- Google STT **removed** — do not re-enable. User preference: OpenAI only.
+- Hallucination filter drops non-ASCII output (catches French/Korean slips) and known
+  junk phrases ("thank you", prompt-echoes). Homophone normalizer in `alfred/voice/intent.py`
+  maps market→marker, sony/soni→sonny, etc., before intent matching.
+- Declarative session prompt — "The robot's name is Sonny. Markers are numbered." —
+  reduces proper-noun mishearing without triggering the prompt-list echo hallucination.
+- Pi USB mic is the **primary** audio input. Phone web mic is a **backup** (`/audio`
+  hold-to-talk, also now using `gpt-4o-mini-transcribe`) and never blocks the Pi listener.
+  Duplicate utterances from both mics are de-duped within 3 s.
+
+Camera (2026-04-23, measured):
+- Default resolution in `config.py` and `CameraManager` is now `1920×1080 @ 30 fps MJPG`.
+- 720p native on this Arducam is a **hardware center-crop + line-skip readout**, not a
+  full-FOV downscale — marker edges go soft, detector fails. Do not use. If a smaller
+  detector image is wanted, cv2.resize the 1080p frame to 1280×720 in software (FOV
+  preserved, detection rate 100 %).
+- Effective FPS ≈ 14–19 at 1080p (USB-2 MJPG decode ceiling on the Pi). Plenty for
+  ArUco whose pixel jitter is ±1 px on a steady marker.
+
+ArUco geometry (2026-04-23, calibrated against actual printed marker):
+- Printed marker size: **18 cm** (`PHYSICAL_MARKER_M = 0.18`).
+- `FOCAL_RATIO = 0.413` at 1920×1080 — calibrated against a 30 cm reading that came
+  out at 476 px side length. Stop target 20 cm, hold band 15–30 cm.
+
+Photo gallery:
+- Robot saves photos to `photos/photo_YYYYMMDD_HHMMSS.jpg`.
+- Web gallery at `/photos` (rendered on demand only — not embedded in the
+  main dashboard). Voice intent `show_photos` ("show me picture", "open
+  gallery") announces the gallery URL.
 
 Architecture
 
-ESP32-S3: Motor PWM + 5x IR sensor reading at 20Hz + HC-SR04 ultrasonic at 10Hz + NeoPixel LEDs + buzzer. Firmware: esp32/src/main.cpp (PlatformIO).
+ESP32-S3: Motor PWM + 5x IR sensor reading at 20Hz + HC-SR04 ultrasonic at 10Hz + buzzer. Firmware: esp32/src/main.cpp (PlatformIO). (NeoPixel removed.)
 Raspberry Pi 5: Decision engine. Python. FSM + vision + voice + expression.
-14" Type-C monitor: Demo face (large animated eyes + status bar) via Pygame `--demo` mode. Debug GUI via default mode.
+14" Type-C monitor: ONLY display on the robot. Demo face (large animated eyes + status bar) via Pygame `--demo` mode. Debug GUI via default mode. **No SSD1306 OLED on this build** — eyes render to a PIL frame consumed by the on-monitor GUI.
 UART: 115200 baud on /dev/ttyAMA2. Pi sends mv_vector:vx,vy,omega\n, ESP sends IR_STATUS:XX\n and DIST:XX.X\n.
 Mecanum IK: FL=vx+vy+omega, FR=vx-vy-omega, RL=vx-vy+omega, RR=vx+vy-omega. PWM 50-200 from 0-100%.
 Wiring: See docs/WIRING.md for complete pin map.
@@ -66,11 +114,9 @@ Purchased (additional):
 - M2/M2.5/M3 bolt+nut+allen key assortment kit
 
 On-robot peripherals:
-- SSD1306 128x64 OLED (I2C @ 0x3C) — animated eyes (also rendered large on 14" monitor in demo mode)
 - PCA9685 16-channel servo controller — head tilt (ch0) + left arm (ch1-2) + right arm (ch3-4)
-- 4x WS2812B NeoPixel LEDs (GPIO48)
 - Piezo buzzer (GPIO46)
-- 3x HC-SR04 ultrasonic: Left (GPIO19 trig, GPIO20 echo), Center (GPIO18 trig, GPIO1 echo), Right (GPIO40 trig, GPIO39 echo)
+- 1x HC-SR04 ultrasonic — CENTER ONLY on this build (GPIO18 trig, GPIO1 echo via 5V→3.3V level shifter). Left/right physical sensors not wired. Firmware reads center-only and emits `DIST_C:` at 10 Hz.
 - 5x TCRT5000 IR line sensors (GPIO 5,6,7,15,45)
 
 Servo Arm Layout (PCA9685):
@@ -87,7 +133,7 @@ R1: Voice commands — wake phrase "Hello Sonny", FOLLOW TRACK, GO TO QR CODE. O
 R2: Line-following delivery. IR sensors + weighted algorithmic control. ✅ (needs ESP32 hardware fix)
 R3: ArUco marker approach (1-50). Visual-only with EMA smoothing. Say "go to marker 5" or any number 1-50. ✅ (needs ESP32)
 R4: Obstacle detection — 3x ultrasonic HC-SR04 (L/C/R, ~90° coverage) + YOLO + OpenAI Vision scene analyzer. ✅ (needs ultrasonic wired)
-R5: Intention indicators — NeoPixel LEDs per state, TTS (piper/espeak-ng), buzzer, OLED eyes, 14" demo face GUI, arm gestures. ✅
+R5: Intention indicators — TTS (piper/espeak-ng), buzzer, OLED eyes, 14" demo face GUI, arm gestures. ✅ (NeoPixel removed — GPIO freed for ultrasonic.)
 EC1: Gesture recognition — MediaPipe hands, 6 gestures, gesture→action in patrol. ✅ (needs mediapipe install)
 EC2: Autonomous rerouting — obstacle_avoider.py potential field. ✅ (basic)
 EC3: OpenAI GPT-4o-mini butler conversation. Unknown intents auto-routed to chat. Low-confidence intents ask to rephrase. ✅ (needs OPENAI_API_KEY + VPN)
@@ -176,16 +222,15 @@ mv_sidepivot:frontSpeed,rearPercent,direction
 mv_curve:leftSpeed,rightSpeed
 mv_vector:vx,vy,omega
 stop:0
-led:r,g,b (NeoPixel color)
-led_pattern:id (0=solid, 1=pulse, 2=rainbow, 3=blink, 4=breathe)
 buzzer:freq,duration_ms
 
 UART Protocol (ESP32 → Pi)
 
 IR_STATUS:XX (5-bit sensor mask, 20Hz)
-DIST_L:XX.X (left ultrasonic cm, 10Hz)
-DIST_C:XX.X (center ultrasonic cm, 10Hz)
-DIST_R:XX.X (right ultrasonic cm, 10Hz)
+DIST_C:XX.X (center ultrasonic cm, 10Hz; -1.0 = no echo / timeout)
+# Note: DIST_L and DIST_R are NOT emitted on this build (sensors not wired).
+# UARTBridge.get_distance() still returns the min of all known sources, so
+# code that polls it works unchanged.
 
 V4 Modules
 
@@ -194,7 +239,7 @@ alfred/comms/ — protocol.py (pure cmd_* formatters), uart.py (UARTBridge, thre
 alfred/navigation/ — line_follower.py (weighted algo, 6-state sub-FSM), aruco_approach.py (visual EMA), obstacle_avoider.py (potential field), patrol.py (wander + person detect), path_planner.py (pure pursuit).
 alfred/vision/ — camera.py (auto-detect V4L2), aruco.py (DICT_4X4_50, dual API), yolo_detector.py (YOLOv8n offline object detection, primary), obstacle.py (contour fallback), person.py (MediaPipe face+hand+gesture), scene_analyzer.py (GPT-4o-mini vision, backup), bev.py, course_mapper.py.
 alfred/voice/ — listener.py (OpenAI API primary + Google + Whisper + VOSK, VAD, wake-once, mic mute), intent.py (GPT-4o-mini smart + keyword fallback), speaker.py (piper/espeak-ng TTS), conversation.py (GPT-4o-mini butler chat).
-alfred/expression/ — eyes.py (8 emotions, OLED + GUI), leds.py (NeoPixel), head.py (PCA9685 ch0), arms.py (PCA9685 ch1-4, cosmetic animations), personality.py (state→expression, 10Hz).
+alfred/expression/ — eyes.py (8 emotions, OLED + GUI), head.py (PCA9685 ch0), arms.py (PCA9685 ch1-4, cosmetic animations), personality.py (state→expression, 10Hz). (leds.py retained as stub for legacy imports; NeoPixel hardware removed.)
 alfred/fsm/ — states.py (17-state IntEnum), controller.py (30Hz dispatch, integrates all subsystems).
 alfred/gui/ — debug_gui.py (Pygame debug dashboard), demo_gui.py (fullscreen robot face for 14" monitor).
 alfred/web/ — app.py (Flask dashboard: camera MJPEG, sensors, voice, keyboard drive, phone mic relay).

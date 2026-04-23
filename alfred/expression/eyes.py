@@ -1,4 +1,9 @@
-"""Eye controller — OLED emotion display with animated gaze tracking."""
+"""Eye controller — emotion frame renderer for the on-monitor face GUI.
+
+The robot has no SSD1306 OLED on this build. Eyes are rendered to a
+PIL frame and consumed by the demo / debug Pygame GUIs that draw onto
+the 14" HDMI monitor. No I²C calls.
+"""
 
 import time
 import threading
@@ -11,19 +16,6 @@ try:
     _HAS_PIL = True
 except ImportError:
     _HAS_PIL = False
-
-# Try to import OLED hardware
-_HAS_OLED = False
-_i2c = None
-_oled = None
-
-try:
-    import board
-    import adafruit_ssd1306
-    _i2c = board.I2C()
-    _HAS_OLED = True
-except (ImportError, Exception):
-    pass
 
 
 # Eye shape definitions: each emotion maps to eye drawing parameters
@@ -41,16 +33,17 @@ EYE_SHAPES = {
 
 
 class EyeController:
-    """Controls OLED eye display with emotion and gaze.
+    """Renders eye frames (PIL image) for the on-monitor face GUI.
 
-    Renders eye shapes to a PIL image. If SSD1306 OLED is connected,
-    pushes frames to hardware. Otherwise, maintains internal state for
-    GUI rendering.
+    Maintains emotion + gaze + blink state. The Pygame demo / debug
+    GUIs read `self._frame` (or call `render`) and draw it large on
+    the 14" HDMI monitor. No hardware OLED.
     """
 
     EMOTIONS = list(EYE_SHAPES.keys())
 
-    def __init__(self, width=128, height=64, address=0x3C):
+    def __init__(self, width=128, height=64, address=None):
+        # `address` kept in signature for backwards-compat callers; ignored.
         self._width = width
         self._height = height
         self._emotion = "neutral"
@@ -61,16 +54,6 @@ class EyeController:
         self._last_blink = time.monotonic()
         self._auto_blink_interval = 4.0  # seconds between auto blinks
         self._frame = None
-
-        self._oled = None
-        if _HAS_OLED:
-            try:
-                self._oled = adafruit_ssd1306.SSD1306_I2C(width, height, _i2c, addr=address)
-                self._oled.fill(0)
-                self._oled.show()
-                logger.info("OLED display connected")
-            except Exception as e:
-                logger.warning(f"OLED init failed: {e}")
 
     def set_emotion(self, emotion):
         """Set the current emotion for eye rendering."""
@@ -89,7 +72,7 @@ class EyeController:
         self._last_blink = time.monotonic()
 
     def update(self):
-        """Render one frame of eye animation and push to OLED if available."""
+        """Render one frame of eye animation into self._frame (PIL image)."""
         if not _HAS_PIL:
             return
 
@@ -152,14 +135,6 @@ class EyeController:
                 self._draw_heart(draw, hx, cy - eh // 2 - 6, 5)
 
         self._frame = img
-
-        # Push to OLED
-        if self._oled:
-            try:
-                self._oled.image(img)
-                self._oled.show()
-            except Exception:
-                pass
 
     def _draw_heart(self, draw, cx, cy, size):
         """Draw a small heart shape."""

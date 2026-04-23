@@ -34,6 +34,7 @@ Available intents:
 - stop: Stop all movement immediately
 - dance: Perform a dance routine
 - take_photo: Take a photo / picture / selfie
+- show_photos: Show me the picture / photos / gallery / show me what you took
 - come_here: Come to me / follow me / come here
 - patrol: Patrol / wander / roam / explore the area
 - sleep: Go to sleep / rest / standby
@@ -94,6 +95,16 @@ class IntentClassifier:
         "take photo": "take_photo",
         "take a picture": "take_photo",
         "take picture": "take_photo",
+        "show me the picture": "show_photos",
+        "show me the photo": "show_photos",
+        "show me the photos": "show_photos",
+        "show me picture": "show_photos",
+        "show me photo": "show_photos",
+        "show me photos": "show_photos",
+        "show the gallery": "show_photos",
+        "show gallery": "show_photos",
+        "open gallery": "show_photos",
+        "open the gallery": "show_photos",
         "photo": "take_photo",
         "picture": "take_photo",
         "selfie": "take_photo",
@@ -132,6 +143,35 @@ class IntentClassifier:
                 self.KEYWORDS.items(), key=lambda x: len(x[0]), reverse=True
             )
 
+    # Homophone normalization — applied before keyword matching.
+    # gpt-4o-mini-transcribe often hears "marker" as "market", "Sonny" as
+    # "Sony", "track" as "rack/back" depending on accent and noise. The
+    # mapping is applied as a whole-word substitution so partial matches
+    # (e.g. "supermarket") are untouched.
+    _HOMOPHONES = {
+        "market": "marker",
+        "markets": "markers",
+        "markup": "marker",
+        "sony": "sonny",
+        "soni": "sonny",
+        "sunny": "sonny",
+        "tony": "sonny",
+        "kenny": "sonny",
+        "sonic": "sonny",
+        "sony's": "sonny",
+        "aruba": "aruco",
+        "arugula": "aruco",
+    }
+
+    @classmethod
+    def _normalize(cls, text):
+        """Whole-word homophone substitution, case-preserving-ish."""
+        import re
+        lower = text.lower()
+        def repl(m):
+            return cls._HOMOPHONES.get(m.group(0), m.group(0))
+        return re.sub(r"\b[a-z']+\b", repl, lower)
+
     def classify(self, text):
         """Classify text into an intent.
 
@@ -144,6 +184,7 @@ class IntentClassifier:
             Tuple (intent_name, confidence). Also sets self.last_marker_id.
         """
         self.last_marker_id = None
+        text = self._normalize(text)
 
         kw = self._classify_keywords(text)
         # Accept keyword match if it's a concrete action.  For go_to_aruco we

@@ -96,12 +96,14 @@ class VisionConfig:
 
 @dataclass(frozen=True)
 class ExpressionConfig:
-    """Expression subsystem."""
-    oled_address: int = 0x3C
-    oled_width: int = 128
-    oled_height: int = 64
-    neopixel_pin: int = 48    # ESP32 GPIO for NeoPixel data
-    neopixel_count: int = 4   # Number of NeoPixel LEDs
+    """Expression subsystem.
+
+    The robot has no SSD1306 OLED and no NeoPixel LEDs on this build.
+    Eyes render to a PIL frame at `eye_width` × `eye_height` and are
+    scaled up by the demo/debug Pygame GUI on the 14" HDMI monitor.
+    """
+    eye_width: int = 128
+    eye_height: int = 64
     buzzer_pin: int = 46      # ESP32 GPIO for buzzer
     head_servo_channel: int = 0
     head_center_angle: int = 90

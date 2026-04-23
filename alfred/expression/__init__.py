@@ -1,1 +1,1 @@
-"""Expression subsystem — OLED eyes, NeoPixel LEDs, head servo, personality."""
+"""Expression subsystem — on-monitor face (eyes), head servo, arms, personality."""

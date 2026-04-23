@@ -187,13 +187,25 @@ class AlfredFSM:
         self.conversation = None
 
         if not no_voice:
+            # Prefer the OpenAI Realtime streaming listener (WebSocket +
+            # server-VAD + gpt-4o-mini-transcribe). No head-of-line blocking
+            # during transcribe so "stop" is always heard. Falls back to
+            # the batch VoiceListener if the SDK / key / network is missing.
             try:
-                from alfred.voice.listener import VoiceListener
-                self.voice_listener = VoiceListener(
+                from alfred.voice.realtime_listener import RealtimeVoiceListener
+                self.voice_listener = RealtimeVoiceListener(
                     wake_phrase=self.config.voice.wake_phrase,
                 )
-            except Exception:
-                pass
+                print("[Init] Voice: Realtime API path")
+            except Exception as e:
+                print(f"[Init] Realtime unavailable ({e}) — batch fallback")
+                try:
+                    from alfred.voice.listener import VoiceListener
+                    self.voice_listener = VoiceListener(
+                        wake_phrase=self.config.voice.wake_phrase,
+                    )
+                except Exception:
+                    pass
             try:
                 from alfred.voice.intent import IntentClassifier
                 self.intent_classifier = IntentClassifier()
@@ -222,17 +234,14 @@ class AlfredFSM:
         try:
             from alfred.expression.eyes import EyeController
             self.eyes = EyeController(
-                width=self.config.expression.oled_width,
-                height=self.config.expression.oled_height,
-                address=self.config.expression.oled_address,
+                width=self.config.expression.eye_width,
+                height=self.config.expression.eye_height,
             )
         except Exception:
             pass
         try:
             from alfred.expression.leds import LEDController
-            self.leds = LEDController(
-                count=self.config.expression.neopixel_count,
-            )
+            self.leds = LEDController()
         except Exception:
             pass
         try:
@@ -712,6 +721,22 @@ class AlfredFSM:
             if self.voice_listener:
                 self.voice_listener.put_to_sleep()
             self.transition(State.SLEEPING)
+            return
+
+        # Show photo gallery — announce URL, stay in current state
+        if intent == "show_photos":
+            import socket
+            try:
+                ip = socket.gethostbyname(socket.gethostname())
+            except Exception:
+                ip = "the Pi"
+            url = f"http://{ip}:8080/photos"
+            msg = f"Opening the photo gallery at {url}"
+            if self.speaker:
+                self.speaker.say("Here are the pictures I took.")
+            if self.gui:
+                self.gui.set_voice_output(msg)
+            print(f"[Gallery] {msg}")
             return
 
         # EC3: Chat — route to conversation engine
@@ -1565,7 +1590,7 @@ class AlfredFSM:
             pass
 
     def _tick_photo(self):
-        """Capture a photo from camera."""
+        """Capture a photo from camera into photos/ gallery folder."""
         if self._photo_taken:
             self.transition(State.IDLE)
             return
@@ -1575,7 +1600,14 @@ class AlfredFSM:
             if frame is not None:
                 try:
                     import cv2
-                    filename = f"photo_{int(time.time())}.jpg"
+                    import os
+                    photo_dir = os.path.join(
+                        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                        "photos",
+                    )
+                    os.makedirs(photo_dir, exist_ok=True)
+                    stamp = time.strftime("%Y%m%d_%H%M%S")
+                    filename = os.path.join(photo_dir, f"photo_{stamp}.jpg")
                     cv2.imwrite(filename, frame)
                     print(f">>> Photo saved: {filename}")
                 except Exception as e:

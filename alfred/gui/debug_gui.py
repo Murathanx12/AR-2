@@ -1,7 +1,7 @@
 """Alfred V4 debug GUI — Pygame-based dashboard for monitoring and control.
 
 Full-screen layout for the 14" monitor or X11 forwarding.
-Shows camera feed with overlays, OLED eyes, sensor data, voice I/O,
+Shows camera feed with overlays, animated eyes, sensor data, voice I/O,
 gesture recognition, movement vectors, and FSM state.
 """
 

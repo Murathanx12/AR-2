@@ -33,13 +33,12 @@
 
 const int irPins[5] = {IR_W_PIN, IR_NW_PIN, IR_N_PIN, IR_NE_PIN, IR_E_PIN};
 
-// ---------------- Ultrasonic sensors (3x HC-SR04) — R4 obstacle detection --
-#define TRIG_L_PIN 19   // GPIO19 — left trigger
-#define ECHO_L_PIN 20   // GPIO20 — left echo (voltage divider!)
-#define TRIG_C_PIN 18   // GPIO18 — center trigger
-#define ECHO_C_PIN 1    // GPIO1  — center echo (voltage divider!)
-#define TRIG_R_PIN 40   // GPIO40 — right trigger
-#define ECHO_R_PIN 39   // GPIO39 — right echo (voltage divider!) ⚠ shared with NeoPixel!
+// ---------------- Ultrasonic sensor (1x HC-SR04, center only) -------------
+// Build state (2026-04-23): only the center HC-SR04 is wired. Left and
+// right pins are reserved for future expansion but not read. ECHO must
+// go through a 5V→3.3V level shifter or resistor divider.
+#define TRIG_C_PIN 18   // GPIO18 — center trigger (3.3V drives HC-SR04 fine)
+#define ECHO_C_PIN 1    // GPIO1  — center echo (level-shifted to 3.3V)
 
 // ---------------- Buzzer — R5 audio indicator ------------------------------
 #define BUZZER_PIN 46  // GPIO46
@@ -486,21 +485,20 @@ void setup()
     pinMode(irPins[i], INPUT);
   }
 
-  // Ultrasonic sensors (3x HC-SR04)
-  pinMode(TRIG_L_PIN, OUTPUT);
-  pinMode(ECHO_L_PIN, INPUT);
+  // Ultrasonic sensor — CENTER ONLY on this build
+  // (Left + Right are wired in firmware but the physical pins are
+  // unconnected; reads on those pins are skipped to save the 60 ms of
+  // pulseIn timeout per cycle that two missing sensors would cost.)
   pinMode(TRIG_C_PIN, OUTPUT);
   pinMode(ECHO_C_PIN, INPUT);
-  pinMode(TRIG_R_PIN, OUTPUT);
-  pinMode(ECHO_R_PIN, INPUT);
 
   // Buzzer
   pinMode(BUZZER_PIN, OUTPUT);
 
-  SERIAL.println("ESP32 V4 booting...");
+  SERIAL.println("ESP32 V4.1 booting...");
   SERIAL.println("UART2 on GPIO16(RX)/GPIO17(TX) at 115200");
 
-  uart2.println("ESP32 Ready (V4 with 3x ultrasonic + buzzer)");
+  uart2.println("ESP32 Ready (V4.1 — center ultrasonic only + buzzer)");
   SERIAL.println("ESP32 Ready — sent hello on UART2");
   IO_init();
 
@@ -539,18 +537,13 @@ void loop()
     lastIrSend = now;
   }
 
-  // --- Broadcast 3x ultrasonic distances at 10 Hz ---
-  // Read sequentially with brief pauses to avoid echo crosstalk
+  // --- Broadcast CENTER ultrasonic distance at 10 Hz ---
+  // Center sensor is the only HC-SR04 wired in this build. Always
+  // print the value (even on timeout = -1.0) so the Pi can see the
+  // sensor is being read; -1.0 means "no echo within 30 ms".
   if (now - lastDistSend >= DIST_SEND_INTERVAL) {
-    float distL = readUltrasonicSingle(TRIG_L_PIN, ECHO_L_PIN);
-    delayMicroseconds(500);
     float distC = readUltrasonicSingle(TRIG_C_PIN, ECHO_C_PIN);
-    delayMicroseconds(500);
-    float distR = readUltrasonicSingle(TRIG_R_PIN, ECHO_R_PIN);
-
-    if (distL >= 0) { uart2.print("DIST_L:"); uart2.println(distL, 1); }
-    if (distC >= 0) { uart2.print("DIST_C:"); uart2.println(distC, 1); }
-    if (distR >= 0) { uart2.print("DIST_R:"); uart2.println(distR, 1); }
+    uart2.print("DIST_C:"); uart2.println(distC, 1);
     lastDistSend = now;
   }
 

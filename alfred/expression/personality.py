@@ -57,7 +57,7 @@ class PersonalityEngine:
         """Update all expression subsystems for the current FSM state.
 
         Only triggers full updates on state transitions. Eye gaze and head
-        tracking update at a lower rate (10Hz) to avoid OLED/I2C bottleneck.
+        tracking update at a lower rate (10Hz) to keep the GUI smooth.
 
         Args:
             fsm_state: State name string (from STATE_NAMES).

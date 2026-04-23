@@ -9,6 +9,12 @@ import logging
 import json
 import time
 import os
+from datetime import datetime
+
+PHOTO_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "photos"
+)
+os.makedirs(PHOTO_DIR, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 
@@ -185,16 +191,17 @@ font-size:11px;color:#484f58;gap:20px}
 <button class="btn" onclick="cmd('dance')">Dance</button>
 <button class="btn" onclick="cmd('patrol')">Patrol</button>
 <button class="btn" onclick="cmd('photo')">Photo</button>
+<button class="btn" onclick="window.open('/photos','_blank')">Gallery</button>
 <button class="btn" onclick="cmd('search')">Search</button>
 <button class="btn" onclick="cmd('sleep')">Sleep</button>
 <button class="btn stop" onclick="cmd('stop')">STOP</button>
 </div></div>
 
-<div class="card"><div class="lbl">Phone Mic (hold to talk)</div>
+<div class="card"><div class="lbl">Phone Mic (BACKUP — Pi mic is primary)</div>
 <button class="btn wake" id="micBtn" style="grid-column:span 4;padding:14px;font-size:16px;font-weight:700"
  ontouchstart="startMic(event)" ontouchend="stopMic(event)"
  onmousedown="startMic(event)" onmouseup="stopMic(event)">🎤 HOLD TO TALK</button>
-<div id="micStatus" style="font-size:12px;color:#8b949e;text-align:center;margin-top:4px">Tap and hold to use phone as mic</div>
+<div id="micStatus" style="font-size:12px;color:#8b949e;text-align:center;margin-top:4px">Pi USB mic runs continuously — use this only if Pi mic fails</div>
 </div>
 
 <div class="card"><div class="lbl">Keyboard Drive</div>
@@ -469,13 +476,26 @@ class WebController:
                         from openai import OpenAI
                         client = OpenAI(api_key=openai_key)
                         with open(tmp_path, 'rb') as f:
+                            # Same model + prompt style that worked well for
+                            # the Pi-mic realtime test. Declarative prompt
+                            # avoids the "command list gets echoed" hallucination.
                             response = client.audio.transcriptions.create(
-                                model="whisper-1",
+                                model="gpt-4o-mini-transcribe",
                                 file=f,
                                 language="en",
-                                prompt="Hello Sonny, follow the track, go to marker, dance, stop, patrol",
+                                prompt="The robot's name is Sonny. Markers are numbered.",
                             )
                         text = response.text.strip().lower()
+                        # Filter known hallucinations (non-English slips,
+                        # prompt echoes, stock "thank you" Whisper fillers).
+                        HALLU = {
+                            "thank you.", "thanks.", "bye.", "bye!", "you.", ".", "...",
+                            "the robot's name is sonny. markers are numbered.",
+                            "hello sonny, follow the track, go to marker, dance, stop, patrol",
+                        }
+                        if text in HALLU or any(ord(c) > 127 for c in text):
+                            log_event(f"Phone mic: dropped hallucination {text!r}")
+                            text = ""
                     except Exception as e:
                         log_event(f"Phone mic OpenAI error: {e}")
 
@@ -500,7 +520,15 @@ class WebController:
                 os.unlink(tmp_path)
 
                 if text:
-                    log_event(f"PHONE MIC: '{text}'")
+                    log_event(f"PHONE MIC (backup): '{text}'")
+                    # Pi mic is primary. If it just transcribed the same utterance
+                    # within the last 3s, drop the phone mic duplicate so we don't
+                    # dispatch twice.
+                    if self.fsm and self.fsm.voice_listener:
+                        last_pi = (self.fsm.voice_listener.last_text or "").strip().lower()
+                        if last_pi and last_pi == text.strip().lower():
+                            log_event(f"PHONE MIC: duplicate of Pi mic, ignoring")
+                            return jsonify({"text": text, "intent": "duplicate", "confidence": "0%"})
                     if self.fsm:
                         # Wake the listener first if not awake
                         if self.fsm.voice_listener and not self.fsm.voice_listener.is_awake:
@@ -635,6 +663,89 @@ class WebController:
                 return jsonify({"logs": [l.strip() for l in lines]})
             except Exception:
                 return jsonify({"logs": []})
+
+        @self._app.route("/photos")
+        def photos():
+            """Gallery — only rendered when the user navigates here
+            (voice: 'show me picture', button, or direct URL). The main
+            dashboard never embeds these, so they are loaded on demand only."""
+            try:
+                entries = []
+                for fn in sorted(os.listdir(PHOTO_DIR), reverse=True):
+                    if not fn.lower().endswith((".jpg", ".jpeg", ".png")):
+                        continue
+                    fp = os.path.join(PHOTO_DIR, fn)
+                    try:
+                        mtime = os.path.getmtime(fp)
+                    except OSError:
+                        continue
+                    entries.append({
+                        "name": fn,
+                        "url": f"/photo/{fn}",
+                        "taken": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                        "mtime": mtime,
+                    })
+                last = entries[0]["taken"] if entries else "no photos yet"
+                cards = "".join(
+                    f'<div class="p-card"><a href="{e["url"]}" target="_blank">'
+                    f'<img src="{e["url"]}" loading="lazy"></a>'
+                    f'<div class="p-meta">{e["name"]}<br><span>{e["taken"]}</span></div></div>'
+                    for e in entries
+                ) or '<p style="color:#8b949e">No photos yet. Say "take a photo" to capture one.</p>'
+                return f"""<!doctype html><html><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Sonny Gallery</title>
+<style>
+body{{font-family:system-ui;background:#0d1117;color:#c9d1d9;margin:0;padding:12px}}
+h1{{color:#58a6ff;margin:0 0 8px 0}}
+.bar{{color:#8b949e;font-size:13px;margin-bottom:12px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}}
+.p-card{{background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}}
+.p-card img{{width:100%;display:block;aspect-ratio:4/3;object-fit:cover}}
+.p-meta{{padding:6px 8px;font-size:11px;color:#c9d1d9}}
+.p-meta span{{color:#8b949e}}
+a{{color:#58a6ff;text-decoration:none}}
+</style></head><body>
+<h1>Sonny — Photo Gallery</h1>
+<div class="bar">Last taken: <b>{last}</b> &nbsp; · &nbsp; <a href="/">← Dashboard</a></div>
+<div class="grid">{cards}</div>
+</body></html>"""
+            except Exception as e:
+                return f"Gallery error: {e}", 500
+
+        @self._app.route("/photo/<path:name>")
+        def photo_file(name):
+            """Serve a single photo file."""
+            from flask import send_from_directory, abort
+            safe = os.path.basename(name)
+            if not safe or safe != name:
+                abort(404)
+            full = os.path.join(PHOTO_DIR, safe)
+            if not os.path.isfile(full):
+                abort(404)
+            return send_from_directory(PHOTO_DIR, safe)
+
+        @self._app.route("/photos.json")
+        def photos_json():
+            """JSON list of photos — used by voice/gallery integrations."""
+            out = []
+            try:
+                for fn in sorted(os.listdir(PHOTO_DIR), reverse=True):
+                    if not fn.lower().endswith((".jpg", ".jpeg", ".png")):
+                        continue
+                    fp = os.path.join(PHOTO_DIR, fn)
+                    try:
+                        mtime = os.path.getmtime(fp)
+                    except OSError:
+                        continue
+                    out.append({
+                        "name": fn,
+                        "url": f"/photo/{fn}",
+                        "taken": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    })
+            except Exception:
+                pass
+            return jsonify({"photos": out, "count": len(out)})
 
         self._thread = threading.Thread(
             target=lambda: self._app.run(

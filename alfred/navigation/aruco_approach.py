@@ -36,8 +36,8 @@ class ArucoApproach:
 
     # Physical geometry of the printed ArUco marker. Adjust to match whatever
     # marker size you're actually using.
-    PHYSICAL_MARKER_M = 0.05     # 5 cm tag
-    FOCAL_RATIO = 0.8            # focal_px ≈ 0.8 · frame_width
+    PHYSICAL_MARKER_M = 0.18     # 18 cm printed tag (measured)
+    FOCAL_RATIO = 0.413          # calibrated 2026-04-23 at 1920x1080: 476 px @ 30 cm
 
     # Target stop distance ≈ 20 cm with a small dead band so the robot doesn't
     # oscillate forward/back around the set point. Ultrasonic will refine this
