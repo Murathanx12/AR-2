@@ -39,16 +39,14 @@ class ArucoApproach:
     PHYSICAL_MARKER_M = 0.18     # 18 cm printed tag (measured)
     FOCAL_RATIO = 0.413          # calibrated 2026-04-23 at 1920x1080: 476 px @ 30 cm
 
-    # Target stop distance 40 cm (user spec, 2026-04-23 evening — bumped up
-    # from 30 cm because the printed marker is mounted on a stand whose
-    # leading edge sits ahead of the tag itself; stopping at 30 cm clipped
-    # the stand). Camera distance is authoritative for the stop. Ultrasonic
-    # only shapes speed (slow < 60 cm) and triggers reroute when something
-    # is between us and the marker.
-    STOP_DIST_M = 0.40           # stop target — 40 cm clear of the stand
-    HOLD_NEAR_M = 0.35           # closer than this → back up
-    HOLD_FAR_M  = 0.48           # farther than this while holding → nudge forward
-    APPROACH_REENGAGE_M = 0.55   # drifted past this → leave hold, re-approach
+    # Target stop distance 30 cm (user spec 2026-04-24 — universal rule:
+    # slow at 40 cm, stop at 30 cm, whether the thing in front is a marker
+    # or an obstacle). Camera distance is authoritative for marker approach;
+    # the centre HC-SR04 mirrors this (slow_cm=40, stop_cm=30 in UltrasonicConfig).
+    STOP_DIST_M = 0.30           # stop target — 30 cm from the marker
+    HOLD_NEAR_M = 0.25           # closer than this → back up
+    HOLD_FAR_M  = 0.38           # farther than this while holding → nudge forward
+    APPROACH_REENGAGE_M = 0.45   # drifted past this → leave hold, re-approach
 
     # Centring tolerance: 20 % of half-frame = ~192 px at 1920×1080. Real
     # pose jitter on a steady marker is ±15-18 % at 1080p (motion blur +
@@ -57,10 +55,9 @@ class ArucoApproach:
 
     # Arrival debounce: the marker must stay inside the stop band AND
     # centred for this many seconds of continuous frames before we commit
-    # to hold mode. Stops the buzzer/announcement from firing on a single
-    # noisy frame at 30 cm — also kills early-stop during slight overshoot
-    # since any deviation outside the band resets the timer.
-    STOP_HOLD_SECONDS = 3.0
+    # to hold mode. User spec 2026-04-24: 1 s — yesterday's smooth-stop
+    # behaviour. 3 s made the robot feel late to confirm arrival.
+    STOP_HOLD_SECONDS = 1.0
 
     def __init__(self):
         self._smooth_cx = None
@@ -85,8 +82,11 @@ class ArucoApproach:
         plenty of time to settle before the marker stand. Profile:
         1.0 m → 30, 0.8 m → 22, 0.6 m → 12, 0.5 m → 8, 0.4 m → 8.
         """
-        vx = int(35 * dist_m * dist_m)
-        return max(8, min(30, vx))
+        # Top speed capped at 20 (user spec 2026-04-24): 30 felt too fast
+        # for the new 30 cm stop distance — the robot was over-shooting
+        # the stop band. 20 gives a gentler decel.
+        vx = int(25 * dist_m * dist_m)
+        return max(8, min(20, vx))
 
     def compute_visual_approach(self, marker, frame_width, frame_height,
                                  us_in_stop_zone: bool = False):

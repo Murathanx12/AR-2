@@ -65,19 +65,20 @@ class UARTConfig:
 class UltrasonicConfig:
     """HC-SR04 ultrasonic — single centre sensor (TRIG=GPIO8, ECHO=GPIO9)."""
     # Hard emergency: any sustained reading below this triggers BLOCKED.
-    threshold_cm: float = 20.0
-    # Approach-time slowdown: scale forward speed proportionally below
-    # `slow_cm`. 100 cm = "react to anything within 1 m" so the robot
-    # has runway to decelerate before reaching the stop zone.
-    slow_cm: float = 100.0
+    # (Overridden by OBSTACLE_THRESHOLD_CM = 30.0 in controller.py — kept
+    # here for reference only.)
+    threshold_cm: float = 30.0
+    # Slow zone for QR-code approach (user spec 2026-04-24 clarified):
+    # scale forward speed proportionally below 60 cm. That gives the
+    # robot a clean deceleration ramp from 60 cm down to the 30 cm stop
+    # so it doesn't overshoot the marker.
+    slow_cm: float = 60.0
     slow_debounce: int = 3
-    # Ultrasonic-confirmed stop zone (used in addition to camera distance).
-    # When the centre US has been reading <= this for `stop_debounce` ticks
-    # AND the marker is visible, we treat that as "in stop band" — the 3 s
-    # arrival debounce in ArucoApproach starts ticking even if the camera
-    # distance estimate is still slightly above STOP_DIST_M (40 cm).
-    # 40 cm: per user spec "start stopping around 40 cm based on sensor".
-    stop_cm: float = 40.0
+    # Universal stop distance: at ≤30 cm we stop. For ArUco approach
+    # this is the arrival band (parallels camera STOP_DIST_M=0.30). For
+    # a lost marker it means an obstacle — anything below 30 cm when
+    # the tag isn't visible is a real blocker, not the marker stand.
+    stop_cm: float = 30.0
     stop_debounce: int = 3
     # Reroute trigger: a sustained reading closer than this is treated as
     # a real obstacle in the path — but only when the camera believes the
