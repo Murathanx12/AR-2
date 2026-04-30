@@ -1,0 +1,496 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 2000" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <polygon points="0 0, 8 4, 0 8" fill="#0a0a0a"/>
+    </marker>
+    <marker id="arrowB" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+      <polygon points="0 0, 6 3, 0 6" fill="#888"/>
+    </marker>
+    <pattern id="hatch" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="6" stroke="#cbd5e1" stroke-width="1"/>
+    </pattern>
+    <style>
+      .title { font-size: 28px; font-weight: 700; fill: #0a0a0a; }
+      .subtitle { font-size: 14px; fill: #475569; }
+      .box-label { font-size: 14px; font-weight: 700; fill: #0a0a0a; }
+      .pin-label { font-size: 11px; fill: #0a0a0a; }
+      .small { font-size: 10px; fill: #475569; }
+      .scenarioA { font-size: 11px; fill: #047857; font-weight: 700; }
+      .scenarioB { font-size: 11px; fill: #b45309; font-weight: 700; }
+      .net { font-size: 10px; fill: #1e40af; font-weight: 600; }
+      .note-title { font-size: 13px; font-weight: 700; fill: #0a0a0a; }
+      .note { font-size: 11px; fill: #1f2937; }
+      .legend { font-size: 11px; fill: #0a0a0a; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1600" height="2000" fill="#fafafa"/>
+
+  <!-- Header -->
+  <text x="40" y="44" class="title">Sonny — Wiring: Scenario A (build now) + Scenario B (stretch)</text>
+  <text x="40" y="68" class="subtitle">PCA9685 servos + 1 center HC-SR04 (solid) — left/right HC-SR04 added later (dashed). Level shifter shown for ECHO 5V→3.3V.</text>
+
+  <!-- Legend -->
+  <g transform="translate(1100, 30)">
+    <rect x="0" y="0" width="460" height="60" fill="#fff" stroke="#cbd5e1" rx="6"/>
+    <text x="14" y="20" class="legend"><tspan fill="#047857" font-weight="700">━━━ SOLID GREEN</tspan>: build for Scenario A (1 ultrasonic)</text>
+    <text x="14" y="40" class="legend"><tspan fill="#b45309" font-weight="700">┄┄┄ DASHED ORANGE</tspan>: add for Scenario B (3 ultrasonics)</text>
+    <text x="14" y="55" class="legend">Black = power/UART/I2C, Blue = signal nets, Red = +5V, Black = GND</text>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- POWER COLUMN (left)                                            -->
+  <!-- ============================================================ -->
+
+  <!-- 12V battery -->
+  <g transform="translate(60, 130)">
+    <rect width="200" height="80" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+    <text x="100" y="30" text-anchor="middle" class="box-label">12 V Battery</text>
+    <text x="100" y="50" text-anchor="middle" class="small">on ESP32 car platform</text>
+    <text x="100" y="66" text-anchor="middle" class="small">≥11V under load</text>
+    <circle cx="170" cy="78" r="4" fill="#dc2626"/>
+    <text x="184" y="82" class="net">+12V</text>
+  </g>
+
+  <!-- LM2596 buck -->
+  <g transform="translate(60, 250)">
+    <rect width="200" height="100" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+    <text x="100" y="24" text-anchor="middle" class="box-label">LM2596 Buck</text>
+    <text x="100" y="42" text-anchor="middle" class="small">12V → 5V @ 3A</text>
+    <text x="100" y="60" text-anchor="middle" class="small">trim pot to 5.0V before</text>
+    <text x="100" y="74" text-anchor="middle" class="small">connecting servos!</text>
+    <circle cx="20" cy="50" r="4" fill="#dc2626"/>
+    <text x="6" y="42" class="net">IN+</text>
+    <circle cx="180" cy="50" r="4" fill="#dc2626"/>
+    <text x="186" y="42" class="net">OUT+5V</text>
+    <circle cx="20" cy="80" r="3" fill="#000"/>
+    <circle cx="180" cy="80" r="3" fill="#000"/>
+    <text x="6" y="98" class="small">GND</text>
+    <text x="170" y="98" class="small">GND</text>
+  </g>
+
+  <!-- Power line: 12V battery -> ESP32 (right) -->
+  <line x1="230" y1="208" x2="230" y2="240" stroke="#dc2626" stroke-width="2"/>
+  <line x1="230" y1="240" x2="700" y2="240" stroke="#dc2626" stroke-width="2"/>
+  <line x1="700" y1="240" x2="700" y2="280" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="450" y="234" class="net">+12V → ESP32 car platform (motors + ESP32 logic)</text>
+
+  <!-- Power line: 12V -> LM2596 -->
+  <line x1="100" y1="210" x2="100" y2="300" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Pi own PSU -->
+  <g transform="translate(60, 400)">
+    <rect width="200" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+    <text x="100" y="24" text-anchor="middle" class="box-label">Pi 5V/5A PSU</text>
+    <text x="100" y="44" text-anchor="middle" class="small">independent of 12V battery</text>
+  </g>
+  <line x1="260" y1="430" x2="450" y2="430" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="270" y="424" class="net">+5V to Pi</text>
+
+  <!-- ============================================================ -->
+  <!-- RASPBERRY PI (center-left)                                     -->
+  <!-- ============================================================ -->
+  <g transform="translate(450, 400)">
+    <rect width="320" height="320" rx="10" fill="#fff" stroke="#0a0a0a" stroke-width="2"/>
+    <text x="160" y="28" text-anchor="middle" class="box-label">Raspberry Pi 5</text>
+    <text x="160" y="46" text-anchor="middle" class="small">(decision engine — Python FSM)</text>
+
+    <!-- GPIO header -->
+    <text x="20" y="78" class="note-title">GPIO header (relevant pins)</text>
+
+    <line x1="20" y1="90" x2="300" y2="90" stroke="#cbd5e1"/>
+
+    <text x="20" y="108" class="pin-label">Pin 1  · 3.3V  ────────────────►</text>
+    <circle cx="300" cy="104" r="4" fill="#dc2626"/>
+    <text x="20" y="128" class="pin-label">Pin 3  · GPIO2  SDA ──────────►</text>
+    <circle cx="300" cy="124" r="4" fill="#1e40af"/>
+    <text x="20" y="148" class="pin-label">Pin 5  · GPIO3  SCL ──────────►</text>
+    <circle cx="300" cy="144" r="4" fill="#1e40af"/>
+    <text x="20" y="168" class="pin-label">Pin 6  · GND   ───────────────►</text>
+    <circle cx="300" cy="164" r="3" fill="#000"/>
+    <text x="20" y="188" class="pin-label">Pin 7  · GPIO4  TX (UART2) ───►</text>
+    <circle cx="300" cy="184" r="4" fill="#1e40af"/>
+    <text x="20" y="208" class="pin-label">Pin 29 · GPIO5  RX (UART2) ◄──</text>
+    <circle cx="300" cy="204" r="4" fill="#1e40af"/>
+
+    <line x1="20" y1="220" x2="300" y2="220" stroke="#cbd5e1"/>
+    <text x="20" y="240" class="note-title">USB / video</text>
+    <text x="20" y="258" class="small">USB3.0 (blue) → Camera</text>
+    <text x="20" y="274" class="small">USB2.0       → Mic</text>
+    <text x="20" y="290" class="small">USB2.0       → Speaker</text>
+    <text x="20" y="306" class="small">µHDMI 0      → 14" monitor</text>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- ESP32-S3 (right)                                                -->
+  <!-- ============================================================ -->
+  <g transform="translate(900, 280)">
+    <rect width="640" height="640" rx="10" fill="#fff" stroke="#0a0a0a" stroke-width="2"/>
+    <text x="320" y="28" text-anchor="middle" class="box-label">ESP32-S3 (on car platform)</text>
+    <text x="320" y="46" text-anchor="middle" class="small">Motor PWM + IR + ultrasonic + buzzer · UART2 to Pi</text>
+
+    <!-- Left side pins -->
+    <text x="20" y="80" class="note-title">Motors (already wired)</text>
+    <text x="20" y="100" class="pin-label">GPIO 3, 10  ── Motor A (FL)</text>
+    <text x="20" y="118" class="pin-label">GPIO 11, 12 ── Motor B (FR)</text>
+    <text x="20" y="136" class="pin-label">GPIO 13, 14 ── Motor C (RL)</text>
+    <text x="20" y="154" class="pin-label">GPIO 21, 47 ── Motor D (RR)</text>
+
+    <text x="20" y="186" class="note-title">IR line sensors (TCRT5000 ×5)</text>
+    <text x="20" y="206" class="pin-label">GPIO 5  · W</text>
+    <text x="20" y="222" class="pin-label">GPIO 6  · NW</text>
+    <text x="20" y="238" class="pin-label">GPIO 7  · N (center)</text>
+    <text x="20" y="254" class="pin-label">GPIO 15 · NE</text>
+    <text x="20" y="270" class="pin-label">GPIO 45 · E</text>
+
+    <text x="20" y="302" class="note-title">UART2 (to Pi)</text>
+    <text x="20" y="322" class="pin-label">GPIO 16 · RX  ◄── Pi TX (Pin 7)</text>
+    <circle cx="14" cy="318" r="4" fill="#1e40af"/>
+    <text x="20" y="340" class="pin-label">GPIO 17 · TX  ──► Pi RX (Pin 29)</text>
+    <circle cx="14" cy="336" r="4" fill="#1e40af"/>
+    <text x="20" y="358" class="pin-label">GND  ◄──────► Pi GND (Pin 6)</text>
+    <circle cx="14" cy="354" r="3" fill="#000"/>
+
+    <text x="20" y="390" class="note-title">Buzzer</text>
+    <text x="20" y="410" class="pin-label">GPIO 46 · Piezo signal</text>
+
+    <!-- Right side: ultrasonic pins -->
+    <text x="340" y="80" class="note-title">Ultrasonic GPIO (3.3V side)</text>
+
+    <text x="340" y="106" class="scenarioA">[A+B] CENTER</text>
+    <text x="340" y="124" class="pin-label">GPIO 18 · TRIG_C ──►</text>
+    <circle cx="600" cy="120" r="4" fill="#1e40af"/>
+    <text x="340" y="142" class="pin-label">GPIO 1  · ECHO_C ◄── (via shifter)</text>
+    <circle cx="600" cy="138" r="4" fill="#1e40af"/>
+
+    <text x="340" y="172" class="scenarioB">[B only] LEFT</text>
+    <text x="340" y="190" class="pin-label" fill="#b45309">GPIO 19 · TRIG_L ──►</text>
+    <circle cx="600" cy="186" r="4" fill="#b45309"/>
+    <text x="340" y="208" class="pin-label" fill="#b45309">GPIO 20 · ECHO_L ◄── (via shifter)</text>
+    <circle cx="600" cy="204" r="4" fill="#b45309"/>
+
+    <text x="340" y="238" class="scenarioB">[B only] RIGHT</text>
+    <text x="340" y="256" class="pin-label" fill="#b45309">GPIO 40 · TRIG_R ──►</text>
+    <circle cx="600" cy="252" r="4" fill="#b45309"/>
+    <text x="340" y="274" class="pin-label" fill="#b45309">GPIO 39 · ECHO_R ◄── (via shifter)</text>
+    <circle cx="600" cy="270" r="4" fill="#b45309"/>
+
+    <text x="340" y="304" class="note-title">Power rails available on board</text>
+    <text x="340" y="324" class="pin-label">3V3 ── shifter VCCA, sensor 3V3 not used</text>
+    <circle cx="600" cy="320" r="4" fill="#dc2626"/>
+    <text x="340" y="342" class="pin-label">5V  ── shifter VCCB, HC-SR04 VCC ──►</text>
+    <circle cx="600" cy="338" r="4" fill="#dc2626"/>
+    <text x="340" y="360" class="pin-label">GND ── shifter GND, HC-SR04 GND ──►</text>
+    <circle cx="600" cy="356" r="3" fill="#000"/>
+
+    <text x="340" y="400" class="note-title">Notes</text>
+    <text x="340" y="418" class="small">• TRIG pins: NO shifter needed (3.3V drives</text>
+    <text x="340" y="432" class="small">  HC-SR04 trigger reliably).</text>
+    <text x="340" y="450" class="small">• ECHO pins MUST go through shifter</text>
+    <text x="340" y="464" class="small">  (5V → 3.3V) or burn the GPIO.</text>
+    <text x="340" y="486" class="small">• Firmware reads all 3 sensors sequentially</text>
+    <text x="340" y="500" class="small">  with 500µs gap (already in main.cpp).</text>
+    <text x="340" y="514" class="small">  Adding L+R later requires NO firmware change.</text>
+  </g>
+
+  <!-- I2C bus from Pi -->
+  <line x1="770" y1="524" x2="800" y2="524" stroke="#1e40af" stroke-width="2"/>
+  <line x1="770" y1="544" x2="800" y2="544" stroke="#1e40af" stroke-width="2"/>
+  <text x="772" y="514" class="net">SDA</text>
+  <text x="772" y="560" class="net">SCL</text>
+
+  <!-- 3.3V from Pi -->
+  <line x1="770" y1="504" x2="790" y2="504" stroke="#dc2626" stroke-width="2"/>
+  <text x="772" y="496" class="net">3V3</text>
+
+  <!-- GND from Pi -->
+  <line x1="770" y1="564" x2="790" y2="564" stroke="#000" stroke-width="2"/>
+  <text x="772" y="582" class="net">GND</text>
+
+  <!-- ============================================================ -->
+  <!-- I2C devices column (between Pi and ESP — top)                  -->
+  <!-- ============================================================ -->
+
+  <!-- OLED -->
+  <g transform="translate(60, 530)">
+    <rect width="320" height="120" rx="8" fill="#fff" stroke="#0a0a0a" stroke-width="2"/>
+    <text x="160" y="26" text-anchor="middle" class="box-label">SSD1306 OLED 128×64</text>
+    <text x="160" y="44" text-anchor="middle" class="small">I²C address 0x3C — animated eyes</text>
+    <text x="20" y="68" class="pin-label">VCC ◄── Pi 3V3 (Pin 1)</text>
+    <circle cx="14" cy="64" r="4" fill="#dc2626"/>
+    <text x="20" y="86" class="pin-label">SDA ◄── Pi SDA (Pin 3)</text>
+    <circle cx="14" cy="82" r="4" fill="#1e40af"/>
+    <text x="20" y="104" class="pin-label">SCL ◄── Pi SCL (Pin 5)</text>
+    <circle cx="14" cy="100" r="4" fill="#1e40af"/>
+    <text x="180" y="68" class="pin-label">GND ◄── Pi GND</text>
+    <circle cx="174" cy="64" r="3" fill="#000"/>
+  </g>
+
+  <!-- PCA9685 -->
+  <g transform="translate(60, 690)">
+    <rect width="320" height="220" rx="8" fill="#ecfdf5" stroke="#047857" stroke-width="2"/>
+    <text x="160" y="26" text-anchor="middle" class="box-label">PCA9685 16-ch PWM (I²C 0x40)</text>
+    <text x="160" y="44" text-anchor="middle" class="small">Servo controller — drives 4× SG90</text>
+
+    <text x="20" y="72" class="note-title">Logic side (from Pi I²C)</text>
+    <text x="20" y="90" class="pin-label">VCC ◄── Pi 3V3</text>
+    <circle cx="14" cy="86" r="4" fill="#dc2626"/>
+    <text x="20" y="106" class="pin-label">SDA ◄── Pi SDA</text>
+    <circle cx="14" cy="102" r="4" fill="#1e40af"/>
+    <text x="20" y="122" class="pin-label">SCL ◄── Pi SCL</text>
+    <circle cx="14" cy="118" r="4" fill="#1e40af"/>
+    <text x="20" y="138" class="pin-label">GND ◄── Pi GND</text>
+    <circle cx="14" cy="134" r="3" fill="#000"/>
+
+    <text x="180" y="72" class="note-title">Servo side</text>
+    <text x="180" y="90" class="pin-label">V+  ◄── 5V from LM2596</text>
+    <circle cx="174" cy="86" r="4" fill="#dc2626"/>
+    <text x="180" y="106" class="pin-label">GND ◄── shared GND rail</text>
+    <circle cx="174" cy="102" r="3" fill="#000"/>
+
+    <line x1="20" y1="156" x2="300" y2="156" stroke="#cbd5e1"/>
+    <text x="20" y="176" class="small">ch0 → Head tilt</text>
+    <text x="20" y="192" class="small">ch1 → Left shoulder</text>
+    <text x="20" y="208" class="small">ch2 → Left elbow</text>
+    <text x="180" y="176" class="small">ch3 → Right shoulder</text>
+    <text x="180" y="192" class="small">ch4 → Right elbow</text>
+    <text x="180" y="208" class="small">(SG90 9g servos)</text>
+  </g>
+
+  <!-- LM2596 → PCA9685 V+ wire -->
+  <line x1="240" y1="350" x2="240" y2="776" stroke="#dc2626" stroke-width="2"/>
+  <line x1="240" y1="776" x2="226" y2="776" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="245" y="500" class="net" transform="rotate(-90 245 500)">+5V to PCA9685 V+</text>
+
+  <!-- ============================================================ -->
+  <!-- LEVEL SHIFTER (bottom-center)                                   -->
+  <!-- ============================================================ -->
+  <g transform="translate(440, 980)">
+    <rect width="500" height="400" rx="10" fill="#fefce8" stroke="#854d0e" stroke-width="2"/>
+    <text x="250" y="30" text-anchor="middle" class="box-label">4-channel Bidirectional Logic Level Shifter</text>
+    <text x="250" y="50" text-anchor="middle" class="small">(MOSFET type — VCCA / VCCB with GND on both sides)</text>
+
+    <!-- LV (3.3V) side - left -->
+    <g transform="translate(20, 80)">
+      <rect width="200" height="280" rx="6" fill="#fff" stroke="#1e40af" stroke-width="1.5"/>
+      <text x="100" y="22" text-anchor="middle" class="note-title">LV side · 3.3V</text>
+      <text x="100" y="38" text-anchor="middle" class="small">(connects to ESP32)</text>
+
+      <text x="14" y="64" class="pin-label">VCCA ◄── ESP 3V3</text>
+      <circle cx="8" cy="60" r="4" fill="#dc2626"/>
+      <text x="14" y="82" class="pin-label">GND  ◄── ESP GND</text>
+      <circle cx="8" cy="78" r="3" fill="#000"/>
+
+      <line x1="14" y1="92" x2="186" y2="92" stroke="#cbd5e1"/>
+
+      <text x="14" y="118" class="scenarioA">A1 ◄── ESP GPIO 1 (ECHO_C)</text>
+      <circle cx="8" cy="114" r="4" fill="#047857"/>
+      <text x="14" y="156" class="scenarioB">A2 ◄── ESP GPIO 20 (ECHO_L)</text>
+      <circle cx="8" cy="152" r="4" fill="#b45309"/>
+      <text x="14" y="194" class="scenarioB">A3 ◄── ESP GPIO 39 (ECHO_R)</text>
+      <circle cx="8" cy="190" r="4" fill="#b45309"/>
+      <text x="14" y="232" class="pin-label">A4 · spare</text>
+
+      <text x="14" y="262" class="small">A1–A4 are open-drain w/</text>
+      <text x="14" y="276" class="small">internal 10kΩ pull-up to VCCA</text>
+    </g>
+
+    <!-- HV (5V) side - right -->
+    <g transform="translate(280, 80)">
+      <rect width="200" height="280" rx="6" fill="#fff" stroke="#dc2626" stroke-width="1.5"/>
+      <text x="100" y="22" text-anchor="middle" class="note-title">HV side · 5V</text>
+      <text x="100" y="38" text-anchor="middle" class="small">(connects to HC-SR04)</text>
+
+      <text x="14" y="64" class="pin-label">VCCB ◄── ESP 5V rail</text>
+      <circle cx="8" cy="60" r="4" fill="#dc2626"/>
+      <text x="14" y="82" class="pin-label">GND  ◄── shared GND</text>
+      <circle cx="8" cy="78" r="3" fill="#000"/>
+
+      <line x1="14" y1="92" x2="186" y2="92" stroke="#cbd5e1"/>
+
+      <text x="14" y="118" class="scenarioA">B1 ◄── HC-SR04(C) ECHO</text>
+      <circle cx="8" cy="114" r="4" fill="#047857"/>
+      <text x="14" y="156" class="scenarioB">B2 ◄── HC-SR04(L) ECHO</text>
+      <circle cx="8" cy="152" r="4" fill="#b45309"/>
+      <text x="14" y="194" class="scenarioB">B3 ◄── HC-SR04(R) ECHO</text>
+      <circle cx="8" cy="190" r="4" fill="#b45309"/>
+      <text x="14" y="232" class="pin-label">B4 · spare</text>
+
+      <text x="14" y="262" class="small">B1–B4 also open-drain w/</text>
+      <text x="14" y="276" class="small">internal 10kΩ pull-up to VCCB</text>
+    </g>
+
+    <!-- Arrow showing translation -->
+    <path d="M 230 220 Q 250 220 270 220" fill="none" stroke="#854d0e" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="250" y="210" text-anchor="middle" class="small">5V→3.3V (echo direction matters)</text>
+
+    <!-- Footer warning -->
+    <text x="20" y="386" class="note">⚠ TRIG lines bypass this shifter — wired direct from ESP3.3V to HC-SR04 TRIG (no translation needed).</text>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- HC-SR04 SENSORS (bottom-right)                                 -->
+  <!-- ============================================================ -->
+
+  <!-- Center (Scenario A) -->
+  <g transform="translate(990, 1000)">
+    <rect width="280" height="120" rx="8" fill="#dcfce7" stroke="#047857" stroke-width="2"/>
+    <text x="140" y="24" text-anchor="middle" class="box-label">HC-SR04 — CENTER  [A+B]</text>
+    <text x="140" y="42" text-anchor="middle" class="scenarioA">forward, mounted dead ahead</text>
+    <text x="20" y="68" class="pin-label">VCC ◄── 5V</text>
+    <circle cx="14" cy="64" r="4" fill="#dc2626"/>
+    <text x="20" y="86" class="pin-label">TRIG ◄── ESP GPIO 18 (3.3V)</text>
+    <circle cx="14" cy="82" r="4" fill="#047857"/>
+    <text x="20" y="104" class="pin-label">ECHO ──► shifter B1 (5V)</text>
+    <circle cx="14" cy="100" r="4" fill="#047857"/>
+    <text x="160" y="86" class="pin-label">GND ◄──► GND</text>
+    <circle cx="154" cy="82" r="3" fill="#000"/>
+  </g>
+
+  <!-- Left (Scenario B only) -->
+  <g transform="translate(990, 1140)">
+    <rect width="280" height="120" rx="8" fill="#fff" stroke="#b45309" stroke-width="2" stroke-dasharray="6 4"/>
+    <text x="140" y="24" text-anchor="middle" class="box-label">HC-SR04 — LEFT  [B only]</text>
+    <text x="140" y="42" text-anchor="middle" class="scenarioB">angled ~30° left of forward</text>
+    <text x="20" y="68" class="pin-label">VCC ◄── 5V</text>
+    <circle cx="14" cy="64" r="4" fill="#dc2626"/>
+    <text x="20" y="86" class="pin-label">TRIG ◄── ESP GPIO 19 (3.3V)</text>
+    <circle cx="14" cy="82" r="4" fill="#b45309"/>
+    <text x="20" y="104" class="pin-label">ECHO ──► shifter B2 (5V)</text>
+    <circle cx="14" cy="100" r="4" fill="#b45309"/>
+    <text x="160" y="86" class="pin-label">GND ◄──► GND</text>
+    <circle cx="154" cy="82" r="3" fill="#000"/>
+  </g>
+
+  <!-- Right (Scenario B only) -->
+  <g transform="translate(990, 1280)">
+    <rect width="280" height="120" rx="8" fill="#fff" stroke="#b45309" stroke-width="2" stroke-dasharray="6 4"/>
+    <text x="140" y="24" text-anchor="middle" class="box-label">HC-SR04 — RIGHT  [B only]</text>
+    <text x="140" y="42" text-anchor="middle" class="scenarioB">angled ~30° right of forward</text>
+    <text x="20" y="68" class="pin-label">VCC ◄── 5V</text>
+    <circle cx="14" cy="64" r="4" fill="#dc2626"/>
+    <text x="20" y="86" class="pin-label">TRIG ◄── ESP GPIO 40 (3.3V)</text>
+    <circle cx="14" cy="82" r="4" fill="#b45309"/>
+    <text x="20" y="104" class="pin-label">ECHO ──► shifter B3 (5V)</text>
+    <circle cx="14" cy="100" r="4" fill="#b45309"/>
+    <text x="160" y="86" class="pin-label">GND ◄──► GND</text>
+    <circle cx="154" cy="82" r="3" fill="#000"/>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- WIRE ROUTING                                                    -->
+  <!-- ============================================================ -->
+
+  <!-- ESP32 ECHO_C → shifter A1 (solid green) -->
+  <path d="M 1500 418 Q 1540 418 1540 980 Q 1540 1098 460 1098" fill="none" stroke="#047857" stroke-width="2"/>
+  <text x="1310" y="1090" class="scenarioA">ECHO_C wire</text>
+
+  <!-- ESP32 TRIG_C → HC-SR04 Center TRIG direct -->
+  <path d="M 1500 400 L 1010 1066" fill="none" stroke="#047857" stroke-width="2"/>
+  <text x="1180" y="780" class="scenarioA">TRIG_C (direct, no shifter)</text>
+
+  <!-- HC-SR04 Center ECHO → shifter B1 -->
+  <path d="M 1004 1100 Q 980 1100 980 1098 Q 970 1098 740 1098" fill="none" stroke="#047857" stroke-width="2"/>
+
+  <!-- ESP 5V → shifter VCCB -->
+  <path d="M 1500 618 Q 1530 618 1530 1040 Q 1530 1058 740 1058" fill="none" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="1310" y="1050" class="net">+5V to VCCB</text>
+
+  <!-- ESP 3V3 → shifter VCCA -->
+  <path d="M 1500 600 Q 1520 600 1520 1040 Q 1520 1040 460 1040" fill="none" stroke="#dc2626" stroke-width="1.5"/>
+
+  <!-- ESP GND → shifter GND (both sides via single GND rail at bottom) -->
+  <path d="M 1500 636 Q 1510 636 1510 1058 L 460 1058" fill="none" stroke="#000" stroke-width="1.5"/>
+
+  <!-- Scenario B wires (dashed orange) -->
+  <!-- ECHO_L from ESP to shifter A2 -->
+  <path d="M 1500 484 Q 1556 484 1556 1136 Q 1556 1136 460 1136" fill="none" stroke="#b45309" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="1310" y="1128" class="scenarioB">ECHO_L</text>
+
+  <!-- ECHO_R -->
+  <path d="M 1500 550 Q 1572 550 1572 1174 L 460 1174" fill="none" stroke="#b45309" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="1310" y="1166" class="scenarioB">ECHO_R</text>
+
+  <!-- TRIG_L direct to HC-SR04 Left -->
+  <path d="M 1500 466 L 1004 1222" fill="none" stroke="#b45309" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="1180" y="900" class="scenarioB">TRIG_L</text>
+
+  <!-- TRIG_R direct to HC-SR04 Right -->
+  <path d="M 1500 532 L 1004 1362" fill="none" stroke="#b45309" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="1180" y="970" class="scenarioB">TRIG_R</text>
+
+  <!-- HC-SR04 Left ECHO → shifter B2 -->
+  <path d="M 1004 1240 Q 980 1240 980 1136 L 740 1136" fill="none" stroke="#b45309" stroke-width="2" stroke-dasharray="6 4"/>
+  <!-- HC-SR04 Right ECHO → shifter B3 -->
+  <path d="M 1004 1380 Q 970 1380 970 1174 L 740 1174" fill="none" stroke="#b45309" stroke-width="2" stroke-dasharray="6 4"/>
+
+  <!-- Pi → ESP UART -->
+  <path d="M 750 584 L 900 584" fill="none" stroke="#1e40af" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="800" y="578" class="net">Pi TX → ESP RX</text>
+  <path d="M 900 604 L 750 604" fill="none" stroke="#1e40af" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="800" y="618" class="net">ESP TX → Pi RX</text>
+  <path d="M 750 564 L 900 564" fill="none" stroke="#000" stroke-width="2"/>
+  <text x="800" y="558" class="net">GND ◄──► GND</text>
+
+  <!-- Pi I2C → OLED + PCA9685 -->
+  <line x1="450" y1="524" x2="380" y2="524" stroke="#1e40af" stroke-width="2"/>
+  <text x="384" y="518" class="net">SDA</text>
+  <line x1="380" y1="524" x2="380" y2="612" stroke="#1e40af" stroke-width="2"/>
+  <line x1="380" y1="612" x2="74" y2="612" stroke="#1e40af" stroke-width="2"/>
+  <line x1="380" y1="612" x2="380" y2="792" stroke="#1e40af" stroke-width="2"/>
+  <line x1="380" y1="792" x2="74" y2="792" stroke="#1e40af" stroke-width="2"/>
+
+  <line x1="450" y1="544" x2="370" y2="544" stroke="#1e40af" stroke-width="2"/>
+  <text x="374" y="558" class="net">SCL</text>
+  <line x1="370" y1="544" x2="370" y2="630" stroke="#1e40af" stroke-width="2"/>
+  <line x1="370" y1="630" x2="74" y2="630" stroke="#1e40af" stroke-width="2"/>
+  <line x1="370" y1="630" x2="370" y2="808" stroke="#1e40af" stroke-width="2"/>
+  <line x1="370" y1="808" x2="74" y2="808" stroke="#1e40af" stroke-width="2"/>
+
+  <!-- Pi 3V3 → OLED VCC + PCA9685 VCC -->
+  <line x1="450" y1="504" x2="390" y2="504" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="396" y="498" class="net">3V3</text>
+  <line x1="390" y1="504" x2="390" y2="594" stroke="#dc2626" stroke-width="1.5"/>
+  <line x1="390" y1="594" x2="74" y2="594" stroke="#dc2626" stroke-width="1.5"/>
+  <line x1="390" y1="594" x2="390" y2="776" stroke="#dc2626" stroke-width="1.5"/>
+  <line x1="390" y1="776" x2="74" y2="776" stroke="#dc2626" stroke-width="1.5"/>
+
+  <!-- Pi GND -->
+  <line x1="450" y1="564" x2="360" y2="564" stroke="#000" stroke-width="1.5"/>
+  <text x="364" y="582" class="net">GND</text>
+
+  <!-- ============================================================ -->
+  <!-- BOTTOM NOTES PANEL                                              -->
+  <!-- ============================================================ -->
+  <g transform="translate(40, 1450)">
+    <rect width="1520" height="510" rx="10" fill="#fff" stroke="#0a0a0a" stroke-width="2"/>
+    <text x="20" y="34" class="title" font-size="20">Build notes</text>
+
+    <text x="20" y="68" class="note-title">Build order (Scenario A first — DO NOT skip steps)</text>
+    <text x="20" y="90" class="note">  1. Trim LM2596 trim-pot to 5.0V with multimeter <tspan fill="#b91c1c" font-weight="700">BEFORE</tspan> connecting PCA9685 servo rail. Servos die at 6V+.</text>
+    <text x="20" y="108" class="note">  2. Establish common GND first: Pi GND ↔ ESP GND ↔ LM2596 GND ↔ shifter GND ↔ all HC-SR04 GND. One star ground saves hours of debugging.</text>
+    <text x="20" y="126" class="note">  3. Wire shifter VCCA (3.3V from ESP) and VCCB (5V from ESP/buck). Verify with multimeter that VCCA reads 3.3V and VCCB reads 5.0V before connecting any signal.</text>
+    <text x="20" y="144" class="note">  4. Wire CENTER HC-SR04: VCC→5V, GND→GND, TRIG→ESP GPIO 18 (direct), ECHO→shifter B1 (HV side), then shifter A1 (LV side)→ESP GPIO 1.</text>
+    <text x="20" y="162" class="note">  5. Power up. Watch ESP serial: should see <tspan font-family="monospace">DIST_C:XX.X</tspan> at 10Hz. Wave hand 10–100cm — value should change smoothly.</text>
+    <text x="20" y="180" class="note">  6. <tspan fill="#047857" font-weight="700">If center sensor reads stable, STOP and ship Scenario A.</tspan> Don't add L+R unless you have ≥30 minutes of bench time.</text>
+
+    <text x="20" y="216" class="note-title">Upgrade to Scenario B (only if A is rock-solid)</text>
+    <text x="20" y="238" class="note">  7. Wire LEFT HC-SR04: VCC→5V, GND→GND, TRIG→GPIO 19, ECHO→shifter B2→A2→GPIO 20.</text>
+    <text x="20" y="256" class="note">  8. Wire RIGHT HC-SR04: VCC→5V, GND→GND, TRIG→GPIO 40, ECHO→shifter B3→A3→GPIO 39.</text>
+    <text x="20" y="274" class="note">  9. ESP32 firmware already reads all 3 sensors and broadcasts <tspan font-family="monospace">DIST_L / DIST_C / DIST_R</tspan> — no re-flash needed.</text>
+    <text x="20" y="292" class="note"> 10. Drop the <tspan font-family="monospace">--no-ultrasonic</tspan> flag from launch when running Scenario B.</text>
+
+    <text x="20" y="328" class="note-title">Why this level shifter is risky for HC-SR04 (mentioned on Apr 22)</text>
+    <text x="20" y="350" class="note">  • The MOSFET shifter pulls HIGH via a passive 10kΩ pull-up. RC time constant ~100ns. HC-SR04 echo edges are ~50ns rise/fall.</text>
+    <text x="20" y="368" class="note">  • Marginal — usually works, sometimes intermittent. If you see <tspan font-family="monospace">DIST_C: -1.0</tspan> (timeout) randomly, the shifter is the suspect.</text>
+    <text x="20" y="386" class="note">  • Backup plan: build a resistor divider on each ECHO instead. 1kΩ ECHO→GPIO, 2kΩ GPIO→GND. 5V × 2/(1+2) = 3.33V. Sharp edges, no pull-up RC.</text>
+
+    <text x="20" y="422" class="note-title">Power budget sanity check</text>
+    <text x="20" y="444" class="note">  • LM2596: 3A continuous capacity at 5V output.</text>
+    <text x="20" y="462" class="note">  • 4× SG90 stall: 4 × 0.6A = 2.4A peak. Don't command all 4 servos to extremes simultaneously. Stagger arm + head animations.</text>
+    <text x="20" y="480" class="note">  • PCA9685 logic + OLED: ~50mA from Pi 3V3 (negligible).</text>
+    <text x="20" y="498" class="note">  • HC-SR04 ×3 active: ~45mA total at 5V. Negligible. They draw current pulses on TRIG, idle is &lt;5mA each.</text>
+  </g>
+</svg>
